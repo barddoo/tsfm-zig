@@ -109,7 +109,10 @@ fn linearBlocks(ctx: *const LinearCtx, b0: usize, b1: usize) void {
 pub fn linear(io: std.Io, y: []f32, x: []const f32, rows: usize, w: []const f32, out: usize, in: usize, bias: ?[]const f32) void {
     std.debug.assert(y.len >= rows * out and x.len >= rows * in and w.len == out * in);
     const ctx: LinearCtx = .{ .y = y, .x = x, .rows = rows, .w = w, .out = out, .in = in, .bias = bias };
-    if (par.threads > 1 and rows * out * in >= (1 << 20) and out >= 2 * col_block) {
+    // Always use the same column blocking, even on one thread: the C BLAS may pick a different
+    // kernel (and rounding) for a different `n`, which would make the output depend on the
+    // thread count. Threads only decide how many blocks run concurrently.
+    if (rows * out * in >= (1 << 20) and out >= 2 * col_block) {
         par.forRange(io, (out + col_block - 1) / col_block, &ctx, linearBlocks);
     } else {
         linearCols(&ctx, 0, out);
@@ -197,6 +200,29 @@ pub fn mulSigmoid(dst: []f32, x: []const f32, g: []const f32) void {
         dst[i..][0..lanes].* = xv / (one + expVec(-gv));
     }
     while (i < dst.len) : (i += 1) dst[i] = x[i] * sigmoid(g[i]);
+}
+
+/// In-place ReLU.
+pub fn relu(x: []f32) void {
+    const zero: Vec = @splat(0);
+    var i: usize = 0;
+    while (i + lanes <= x.len) : (i += lanes) {
+        const v: Vec = x[i..][0..lanes].*;
+        x[i..][0..lanes].* = @max(v, zero);
+    }
+    while (i < x.len) : (i += 1) x[i] = @max(x[i], 0);
+}
+
+/// In-place RoPE over one head in the Llama `rotate_half` layout: dims `i` and `i + half` are
+/// paired, and `cos` / `sin` hold `half` angles.
+pub fn ropeHalf(x: []f32, cos: []const f32, sin: []const f32, half: usize) void {
+    std.debug.assert(x.len >= 2 * half and cos.len >= half and sin.len >= half);
+    for (0..half) |i| {
+        const x1 = x[i];
+        const x2 = x[i + half];
+        x[i] = x1 * cos[i] - x2 * sin[i];
+        x[i + half] = x2 * cos[i] + x1 * sin[i];
+    }
 }
 
 /// Softmax in place; entries equal to -inf get exactly zero weight.

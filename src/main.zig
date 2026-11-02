@@ -1,4 +1,5 @@
-//! timestral: zero-shot probabilistic time series forecasting from a Timestral checkpoint.
+//! timestral: zero-shot probabilistic time series forecasting from a Timestral or Chronos-2
+//! checkpoint (the family is selected from `config.json`).
 
 const std = @import("std");
 const core = @import("core");
@@ -7,6 +8,7 @@ const cfg = @import("timestral/config.zig");
 const st = core.safetensors;
 const model_mod = @import("timestral/model.zig");
 const forecaster = @import("timestral/forecaster.zig");
+const chronos2 = @import("chronos2");
 const hub = core.hub;
 const par = core.par;
 
@@ -14,18 +16,20 @@ const usage =
     \\usage: timestral <model> <series.csv> --horizon N [options]
     \\
     \\  <model>       a directory with config.json and model.safetensors, or a Hugging Face
-    \\                Hub repo id such as mistralai/Timestral-28M (cached, else downloaded)
+    \\                Hub repo id such as mistralai/Timestral-28M or amazon/chronos-2
+    \\                (cached, else downloaded). Chronos-2 is selected by its config.json.
     \\  <series.csv>  one line per variate; values separated by commas or whitespace; nan / NA /
     \\                an empty field marks a missing value. Separate several series with a
     \\                blank line (all with the same number of variates and steps).
     \\
-    \\covariates (same blank-line-separated blocks, one block per series, one line per covariate):
+    \\Timestral covariates (same blank-line-separated blocks, one block per series, one line
+    \\per covariate; not available for Chronos-2):
     \\  --past FILE         past-only covariates, as many steps as the series
     \\  --known FILE        known-future covariates, steps + horizon values per line
     \\  --cat-past FILE     categorical codes, as many steps as the series
     \\  --cat-known FILE    categorical codes, steps + horizon values per line
     \\
-    \\options:
+    \\options (Chronos-2 horizons are limited to 1024 steps and its series are univariate):
     \\  --horizon N         steps to forecast (required)
     \\  --max-context N     keep only the most recent N steps (default: trained length)
     \\  --block-patches N   patches decoded per block (default 32)
@@ -225,6 +229,10 @@ fn run(init: std.process.Init) !void {
     defer allocator.free(cfg_path);
     const cfg_text = try sys.readFile(io, allocator, cfg_path);
     defer allocator.free(cfg_text);
+    if (try chronos2.config.isChronos2(allocator, cfg_text)) {
+        try runChronos2(io, par_io, allocator, args, model_dir, cfg_text, t_start);
+        return;
+    }
     const parsed = try cfg.parse(allocator, cfg_text);
     defer parsed.deinit();
 
@@ -287,6 +295,72 @@ fn run(init: std.process.Init) !void {
     defer out.deinit(allocator);
     try out.appendSlice(allocator, "series,variate,step");
     for (parsed.value.quantile_knots) |level| try out.print(allocator, ",q{d}", .{level});
+    try out.append(allocator, '\n');
+    for (0..b) |s| {
+        for (0..v) |r| {
+            for (0..args.horizon) |step| {
+                try out.print(allocator, "{d},{d},{d}", .{ s, r, step + 1 });
+                for (result[(((s * v) + r) * args.horizon + step) * q ..][0..q]) |x| try out.print(allocator, ",{d}", .{x});
+                try out.append(allocator, '\n');
+            }
+        }
+    }
+    try sys.writeStdout(io, out.items);
+}
+
+fn runChronos2(
+    io: std.Io,
+    par_io: std.Io,
+    allocator: std.mem.Allocator,
+    args: Args,
+    model_dir: []const u8,
+    cfg_text: []const u8,
+    t_start: f64,
+) !void {
+    if (args.past != null or args.known != null or args.cat_past != null or args.cat_known != null) {
+        sys.eprint(io, "Chronos-2 does not support covariates in this runner (v1): --past, --known, --cat-past and --cat-known are unavailable\n");
+        return error.CovariatesUnsupported;
+    }
+    if (!args.opts.symmetric_averaging or !args.opts.clip_nonnegative or args.opts.max_context != 0 or args.opts.per_shot_horizon_patches != 32) {
+        sys.eprint(io, "--max-context, --block-patches, --no-symmetric and --no-clip are Timestral-only options\n");
+        return error.UnsupportedOption;
+    }
+
+    const parsed = try chronos2.config.parse(allocator, cfg_text);
+    defer parsed.deinit();
+    const c = parsed.value;
+    if (args.horizon > c.predictionLength()) {
+        sys.eprintf(io, "Chronos-2 supports horizons up to {d} steps (long-horizon unrolling is not ported)\n", .{c.predictionLength()});
+        return error.HorizonTooLong;
+    }
+
+    const w_path = try std.fmt.allocPrint(allocator, "{s}/model.safetensors", .{model_dir});
+    defer allocator.free(w_path);
+    var weights = try st.Weights.open(io, allocator, w_path);
+    defer weights.close(io);
+    var model = try chronos2.model.Model.load(io, allocator, c, &weights);
+    defer model.deinit(allocator);
+    const t_loaded = sys.now(io);
+
+    const series = try loadBlocks(io, allocator, args.series);
+    defer allocator.free(series.data);
+    const b = series.blocks;
+    const v = series.rows;
+    const t = series.len;
+
+    // Chronos-2 v1 is univariate: every (series, variate) row is its own independent series.
+    const values = try toF32(allocator, series.data);
+    defer allocator.free(values);
+    const n = b * v;
+    const result = try chronos2.forecaster.forecast(allocator, par_io, &model, values, n, t, args.horizon);
+    defer allocator.free(result);
+    if (args.time) sys.eprintf(io, "load={d:.3}s forecast={d:.3}s\n", .{ t_loaded - t_start, sys.now(io) - t_loaded });
+
+    const q = c.numQuantiles();
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, "series,variate,step");
+    for (c.chronos_config.quantiles) |level| try out.print(allocator, ",q{d}", .{level});
     try out.append(allocator, '\n');
     for (0..b) |s| {
         for (0..v) |r| {

@@ -1,0 +1,17 @@
+tsfm-zig
+Copyright 2026 the tsfm-zig authors
+
+This product includes software ported from:
+
+  mistralai/timestral
+  https://github.com/mistralai/timestral
+  Copyright Mistral AI
+  Licensed under the Apache License, Version 2.0.
+
+  amazon-science/chronos-forecasting
+  https://github.com/amazon-science/chronos-forecasting
+  Copyright Amazon.com, Inc. or its affiliates
+  Licensed under the Apache License, Version 2.0.
+
+The Chronos-2 model architecture in src/chronos2 is a port of
+chronos.chronos2.model and chronos.chronos2.layers from that repository.

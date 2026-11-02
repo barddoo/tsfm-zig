@@ -43,6 +43,14 @@ pub fn build(b: *std.Build) void {
         .builtin => {},
     }
 
+    const chronos2_mod = b.addModule("chronos2", .{
+        .root_source_file = b.path("src/chronos2/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = blas != .builtin,
+        .imports = &.{.{ .name = "core", .module = core_mod }},
+    });
+
     const exe = b.addExecutable(.{
         .name = "timestral",
         .root_module = b.createModule(.{
@@ -50,7 +58,10 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = blas != .builtin,
-            .imports = &.{.{ .name = "core", .module = core_mod }},
+            .imports = &.{
+                .{ .name = "core", .module = core_mod },
+                .{ .name = "chronos2", .module = chronos2_mod },
+            },
         }),
     });
     switch (blas) {
@@ -71,7 +82,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = blas != .builtin,
-        .imports = &.{.{ .name = "core", .module = core_mod }},
+        .imports = &.{
+            .{ .name = "core", .module = core_mod },
+            .{ .name = "chronos2", .module = chronos2_mod },
+        },
     });
     switch (blas) {
         .accelerate => lib_mod.linkFramework("Accelerate", .{}),

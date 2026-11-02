@@ -9,3 +9,5 @@ pub const safetensors = core.safetensors;
 pub const hub = core.hub;
 pub const par = core.par;
 pub const sys = core.sys;
+
+pub const chronos2 = @import("chronos2");

@@ -1,7 +1,7 @@
 .{
-    .name = .timestral,
+    .name = .tsfm,
     .version = "0.1.0",
-    .fingerprint = 0x302e85437343852,
+    .fingerprint = 0x930aef1a4bccc343,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .translate_c = .{
@@ -16,5 +16,6 @@
         "tests",
         "README.md",
         "LICENSE",
+        "NOTICE",
     },
 }
