@@ -47,7 +47,7 @@ const ResBlock = struct {
         const r = try allocator.alloc(f32, rows * self.out);
         defer allocator.free(r);
         nn.linear(io, r, x, rows, self.residual.w, self.out, self.in, self.residual.b);
-        for (y[0 .. rows * self.out], r) |*a, b| a.* += b;
+        nn.addInPlace(y[0 .. rows * self.out], r);
     }
 };
 
@@ -183,6 +183,9 @@ pub const Model = struct {
         const vb = try allocator.alloc(f32, rows * d);
         const ab = try allocator.alloc(f32, rows * d);
 
+        var keys_all_valid = true;
+        for (key_valid) |v| keys_all_valid = keys_all_valid and v;
+
         const cos_t = try allocator.alloc(f32, seq * half);
         const sin_t = try allocator.alloc(f32, seq * half);
         for (0..seq) |tok| {
@@ -196,18 +199,18 @@ pub const Model = struct {
 
         for (self.layers) |layer| {
             nn.rmsNorm(io, xn, x, rows, d, layer.time.norm, eps);
-            try self.timeAttention(io, delta, xn, layer.time, qb, kb, vb, ab, cos_t, sin_t, key_valid, b, seq);
-            for (x, delta[0..x.len]) |*xv, dv| xv.* += dv;
+            try self.timeAttention(io, delta, xn, layer.time, qb, kb, vb, ab, cos_t, sin_t, key_valid, keys_all_valid, b, seq);
+            nn.addInPlace(x, delta[0..x.len]);
 
             nn.rmsNorm(io, xn, x, rows, d, layer.group.norm, eps);
             self.groupAttention(io, delta, xn, layer.group, vb, rows);
-            for (x, delta[0..x.len]) |*xv, dv| xv.* += dv;
+            nn.addInPlace(x, delta[0..x.len]);
 
             nn.rmsNorm(io, xn, x, rows, d, layer.mlp_norm, eps);
             nn.linear(io, mlp_h, xn, rows, layer.wi, hid, d, null);
             nn.relu(mlp_h);
             nn.linear(io, delta, mlp_h, rows, layer.wo, d, hid, null);
-            for (x, delta[0..x.len]) |*xv, dv| xv.* += dv;
+            nn.addInPlace(x, delta[0..x.len]);
         }
 
         nn.rmsNorm(io, x, x, rows, d, self.final_norm, eps);
@@ -226,6 +229,7 @@ pub const Model = struct {
         cos_t: []const f32,
         sin_t: []const f32,
         key_valid: []const bool,
+        keys_all_valid: bool,
         b: usize,
         seq: usize,
     ) !void {
@@ -257,6 +261,7 @@ pub const Model = struct {
             .v = vb,
             .o = ab,
             .key_valid = key_valid,
+            .keys_all_valid = keys_all_valid,
             .seq = seq,
             .d = d,
             .nh = nh,
@@ -285,6 +290,7 @@ const TimeJob = struct {
     v: []const f32,
     o: []f32,
     key_valid: []const bool,
+    keys_all_valid: bool,
     seq: usize,
     d: usize,
     nh: usize,
@@ -307,12 +313,16 @@ const TimeJob = struct {
             const kv = self.key_valid[r * seq ..][0..seq];
 
             nn.gemmNT(scores, seq, self.q[base + off ..], d, self.k[base + off ..], d, seq, seq, hd, 1.0);
-            for (0..seq) |i| {
-                const row = scores[i * seq ..][0..seq];
-                for (0..seq) |j| if (!kv[j]) {
-                    row[j] += mask_min;
-                };
-                nn.softmax(row);
+            if (self.keys_all_valid) {
+                for (0..seq) |i| nn.softmax(scores[i * seq ..][0..seq]);
+            } else {
+                for (0..seq) |i| {
+                    const row = scores[i * seq ..][0..seq];
+                    for (0..seq) |j| if (!kv[j]) {
+                        row[j] += mask_min;
+                    };
+                    nn.softmax(row);
+                }
             }
             nn.gemmNN(self.o[base + off ..], d, scores, seq, self.v[base + off ..], d, seq, hd, seq);
         }

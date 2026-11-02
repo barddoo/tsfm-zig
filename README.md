@@ -6,10 +6,14 @@ Everything except the matrix products is Zig standard library: files and memory-
 (`std.Io`), the Hub download (`std.http.Client`, `std.json`), threads (`std.Io.Threaded`) and SIMD
 (`@Vector`). Matrix products can run on a C BLAS (Apple Accelerate by default on macOS, OpenBLAS
 optionally) bound through [translate-c](https://codeberg.org/ziglang/translate-c) (pinned to its
-`zig-0.17.x` branch); the builtin SIMD kernels need no C library at all. Elementwise work (softmax,
-SiLU, ReLU, RMSNorm) uses `@Vector`, and the layers run on a `std.Io.Threaded` pool: linear layers
-split by output columns, attention by (row, head), and the forward and mirrored passes of symmetric
-averaging run concurrently. Output is identical for any thread count.
+`zig-0.17.x` branch); the `builtin` SIMD kernels need no C library at all. Elementwise work (softmax,
+SiLU, ReLU, RMSNorm, RoPE, residual adds) uses `@Vector`, and the layers run on a
+`std.Io.Threaded` pool: linear layers split by output columns, attention by (row, head), and the
+forward and mirrored passes of symmetric averaging run concurrently. Attention keeps Q/K/V in one
+`(token, q|k|v, head, head_dim)` buffer: the fused projection rows are reordered once when the
+weights load, so every head is a contiguous vector and the time and variate kernels read it without
+per-token gathers (the variate path also hoists its key mask out of the per-head loop). Output is
+identical for any thread count.
 
 ```bash
 zig build --release=fast
@@ -66,8 +70,10 @@ Other options: `--threads N` (default: one per logical CPU; `1` is single-thread
 |---|---|---|
 | `-Dblas=` | `accelerate`, `openblas`, `builtin` | `accelerate` on macOS, `builtin` elsewhere |
 
-`builtin` is about 2x slower than Accelerate on the 28M Timestral model (17 vs 9 ms); use
-`-Dblas=openblas` on Linux for speed. Cross-compiling works with the builtin kernels (Linux
+`builtin` is about 1.5x slower than Accelerate on the 28M Timestral model (16 vs 10 ms on an
+Apple Silicon laptop); use `-Dblas=openblas` on Linux for speed. The builtin kernels tile the
+inner product 4 rows x 4 columns (2 rows on wide AVX2 targets) so each streamed row of the weight
+matrix is reused across several output rows. Cross-compiling works with the builtin kernels (Linux
 x86_64/aarch64, musl, Windows, macOS):
 `zig build --release=fast -Dblas=builtin -Dtarget=x86_64-linux-gnu`.
 

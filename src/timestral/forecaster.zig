@@ -500,14 +500,17 @@ fn blockDecode(
             for (0..vall) |i| {
                 const r = g * vall + i;
                 const trow = g * v + ti;
-                for (0..keep_t) |j| {
-                    const src = nt_len - keep_t + j; // index in the extended row
-                    if (src < t) {
-                        nctx[r * keep_t + j] = ctx[r * t + src];
-                        nmask[r * keep_t + j] = cmask[r * t + src];
-                        continue;
-                    }
-                    const s = src - t;
+                // Everything that is still inside the old context is a contiguous copy.
+                const start = nt_len - keep_t;
+                const ncopy = if (start < t) t - start else 0;
+                if (ncopy > 0) {
+                    @memcpy(nctx[r * keep_t ..][0..ncopy], ctx[r * t + start ..][0..ncopy]);
+                    @memcpy(nmask[r * keep_t ..][0..ncopy], cmask[r * t + start ..][0..ncopy]);
+                }
+                // The rest are the newly decoded steps.
+                const s0 = if (start < t) 0 else start - t;
+                for (s0..s0 + (keep_t - ncopy)) |s| {
+                    const j = s - s0 + ncopy;
                     switch (roles[i]) {
                         .target => {
                             var m = qs[(trow * blen + s) * q + med];
