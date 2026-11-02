@@ -1,13 +1,14 @@
 //! timestral: zero-shot probabilistic time series forecasting from a Timestral checkpoint.
 
 const std = @import("std");
-const sys = @import("sys.zig");
-const cfg = @import("config.zig");
-const st = @import("safetensors.zig");
-const model_mod = @import("model.zig");
-const forecaster = @import("forecaster.zig");
-const hub = @import("hub.zig");
-const par = @import("par.zig");
+const core = @import("core");
+const sys = core.sys;
+const cfg = @import("timestral/config.zig");
+const st = core.safetensors;
+const model_mod = @import("timestral/model.zig");
+const forecaster = @import("timestral/forecaster.zig");
+const hub = core.hub;
+const par = core.par;
 
 const usage =
     \\usage: timestral <model> <series.csv> --horizon N [options]

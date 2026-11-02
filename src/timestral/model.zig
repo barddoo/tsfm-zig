@@ -7,9 +7,10 @@
 
 const std = @import("std");
 const cfg = @import("config.zig");
-const nn = @import("nn.zig");
-const st = @import("safetensors.zig");
-const par = @import("par.zig");
+const core = @import("core");
+const nn = core.nn;
+const st = core.safetensors;
+const par = core.par;
 
 const Allocator = std.mem.Allocator;
 

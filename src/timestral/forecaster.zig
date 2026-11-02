@@ -8,8 +8,9 @@
 
 const std = @import("std");
 const model_mod = @import("model.zig");
-const nn = @import("nn.zig");
-const par = @import("par.zig");
+const core = @import("core");
+const nn = core.nn;
+const par = core.par;
 
 const Allocator = std.mem.Allocator;
 const Model = model_mod.Model;

@@ -1,9 +1,11 @@
 //! Public API surface for the timestral library.
 
-pub const cfg = @import("config.zig");
-pub const safetensors = @import("safetensors.zig");
-pub const model = @import("model.zig");
-pub const forecaster = @import("forecaster.zig");
-pub const hub = @import("hub.zig");
-pub const par = @import("par.zig");
-pub const sys = @import("sys.zig");
+pub const core = @import("core");
+
+pub const cfg = @import("timestral/config.zig");
+pub const model = @import("timestral/model.zig");
+pub const forecaster = @import("timestral/forecaster.zig");
+pub const safetensors = core.safetensors;
+pub const hub = core.hub;
+pub const par = core.par;
+pub const sys = core.sys;

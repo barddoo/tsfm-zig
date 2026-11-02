@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
     // The `c` module: the BLAS header translated to Zig, or an empty module for the builtin
     // kernels (which then need no C library at all).
     const c_mod = switch (blas) {
-        .builtin => b.createModule(.{ .root_source_file = b.path("src/c_none.zig") }),
+        .builtin => b.createModule(.{ .root_source_file = b.path("src/core/c_none.zig") }),
         .accelerate, .openblas => blk: {
             const header = b.addWriteFiles().add("c.h", switch (blas) {
                 .accelerate => "#include <Accelerate/Accelerate.h>\n",
@@ -29,6 +29,20 @@ pub fn build(b: *std.Build) void {
         },
     };
 
+    // Shared kernels and IO, imported by both model implementations.
+    const core_mod = b.addModule("core", .{
+        .root_source_file = b.path("src/core/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = blas != .builtin,
+        .imports = &.{.{ .name = "c", .module = c_mod }},
+    });
+    switch (blas) {
+        .accelerate => core_mod.linkFramework("Accelerate", .{}),
+        .openblas => core_mod.linkSystemLibrary("openblas", .{}),
+        .builtin => {},
+    }
+
     const exe = b.addExecutable(.{
         .name = "timestral",
         .root_module = b.createModule(.{
@@ -36,7 +50,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .link_libc = blas != .builtin,
-            .imports = &.{.{ .name = "c", .module = c_mod }},
+            .imports = &.{.{ .name = "core", .module = core_mod }},
         }),
     });
     switch (blas) {
@@ -57,7 +71,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = blas != .builtin,
-        .imports = &.{.{ .name = "c", .module = c_mod }},
+        .imports = &.{.{ .name = "core", .module = core_mod }},
     });
     switch (blas) {
         .accelerate => lib_mod.linkFramework("Accelerate", .{}),
