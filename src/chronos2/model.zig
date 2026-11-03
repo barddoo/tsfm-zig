@@ -156,6 +156,8 @@ pub const Model = struct {
 
     /// Run the encoder over `x` `(b, seq, d)` in place. `key_valid` is `(b, seq)`: a key is
     /// attended only where it is set (context patches with an observation, REG and future).
+    /// All scratch is owned by a per-call arena backed by `allocator`, so nothing is retained
+    /// when this returns and any allocator is safe to pass.
     pub fn encode(
         self: *const Model,
         io: std.Io,
@@ -166,6 +168,10 @@ pub const Model = struct {
         n_ctx: usize,
         n_out: usize,
     ) !void {
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
         const c = self.config;
         const d: usize = c.d_model;
         const hid: usize = c.d_ff;
@@ -175,19 +181,19 @@ pub const Model = struct {
         const rows = b * seq;
         const eps: f32 = @floatCast(c.layer_norm_epsilon);
 
-        const xn = try allocator.alloc(f32, rows * d);
-        const delta = try allocator.alloc(f32, rows * d);
-        const mlp_h = try allocator.alloc(f32, rows * hid);
-        const qb = try allocator.alloc(f32, rows * d);
-        const kb = try allocator.alloc(f32, rows * d);
-        const vb = try allocator.alloc(f32, rows * d);
-        const ab = try allocator.alloc(f32, rows * d);
+        const xn = try arena.alloc(f32, rows * d);
+        const delta = try arena.alloc(f32, rows * d);
+        const mlp_h = try arena.alloc(f32, rows * hid);
+        const qb = try arena.alloc(f32, rows * d);
+        const kb = try arena.alloc(f32, rows * d);
+        const vb = try arena.alloc(f32, rows * d);
+        const ab = try arena.alloc(f32, rows * d);
 
         var keys_all_valid = true;
         for (key_valid) |v| keys_all_valid = keys_all_valid and v;
 
-        const cos_t = try allocator.alloc(f32, seq * half);
-        const sin_t = try allocator.alloc(f32, seq * half);
+        const cos_t = try arena.alloc(f32, seq * half);
+        const sin_t = try arena.alloc(f32, seq * half);
         for (0..seq) |tok| {
             const pos: f32 = @floatFromInt(tok);
             for (0..half) |i| {
