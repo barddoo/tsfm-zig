@@ -85,7 +85,7 @@ const vtable: backend.Backend.VTable = .{
     .release_weight = releaseWeight,
     .sgemm_nt = sgemmNT,
     .sgemm_nn = sgemmNN,
-    // MPS has a high per-call cost; see docs/plans/gpu-metal.md.
+    // MPS has a high per-call cost.
     .linear_min_ops = 1 << 28,
     .activation_min_ops = 1 << 28,
 };

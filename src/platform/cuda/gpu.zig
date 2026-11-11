@@ -87,7 +87,7 @@ const vtable: backend.Backend.VTable = .{
     .release_weight = releaseWeight,
     .sgemm_nt = sgemmNT,
     .sgemm_nn = sgemmNN,
-    // cuBLAS is much cheaper per call than MPS; see docs/plans/gpu-cuda.md.
+    // cuBLAS is much cheaper per call than MPS.
     .linear_min_ops = 1 << 20,
     .activation_min_ops = 1 << 24,
 };
