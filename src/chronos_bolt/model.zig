@@ -10,13 +10,15 @@
 //! `o(v(norm(x)))`; its cross-attention has no position bias, only the encoder key mask.
 
 const std = @import("std");
+const mem = std.mem;
+const Io = std.Io;
 const cfg = @import("config.zig");
 const core = @import("core");
 const nn = core.nn;
 const st = core.safetensors;
-const ResBlock = core.resblock.ResBlock;
+const ResBlock = core.resblock.ResBlock(.relu);
 
-const Allocator = std.mem.Allocator;
+const Allocator = mem.Allocator;
 
 const EncLayer = struct {
     attn_norm: []const f32 = &.{},
@@ -64,7 +66,7 @@ const DecLayer = struct {
 };
 
 fn tensorName(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
-    return std.fmt.bufPrint(buf, fmt, args) catch unreachable;
+    return mem.print(buf, fmt, args) catch unreachable;
 }
 
 /// T5's bidirectional relative-position bucket for `rel = key_pos - query_pos`
@@ -96,7 +98,7 @@ pub const Model = struct {
     dec_layers: []DecLayer,
     dec_final_norm: []const f32,
 
-    pub fn load(io: std.Io, allocator: Allocator, backend: ?nn.Backend, config: cfg.Config, w: *st.Weights) !Model {
+    pub fn load(io: Io, allocator: Allocator, backend: ?nn.Backend, config: cfg.Config, w: *st.Weights) !Model {
         const d: usize = config.d_model;
         const ff: usize = config.d_ff;
         const inner = config.inner();
@@ -105,9 +107,9 @@ pub const Model = struct {
         const out_dim = nq * @as(usize, config.chronos_config.prediction_length);
         var buf: [256]u8 = undefined;
 
-        const input_embed = try ResBlock.load(io, backend, w, &buf, "input_patch_embedding", 2 * ps, ff, d);
+        const input_embed = try ResBlock.load(io, backend, w, &buf, "input_patch_embedding", 2 * ps, ff, d, true);
         errdefer input_embed.deinit();
-        const output_embed = try ResBlock.load(io, backend, w, &buf, "output_patch_embedding", d, ff, out_dim);
+        const output_embed = try ResBlock.load(io, backend, w, &buf, "output_patch_embedding", d, ff, out_dim, true);
         errdefer output_embed.deinit();
         const shared = try w.get(io, "shared.weight", config.vocabSize() * d);
         const rel_bias = try w.get(io, "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight", @as(usize, config.relative_attention_num_buckets) * config.num_heads);
@@ -179,7 +181,7 @@ pub const Model = struct {
     }
 
     /// Embed `(rows, 2 * patch_size)` patch features (values, then observation mask).
-    pub fn embed(self: *const Model, io: std.Io, allocator: Allocator, out: []f32, feats: []const f32, rows: usize) !void {
+    pub fn embed(self: *const Model, io: Io, allocator: Allocator, out: []f32, feats: []const f32, rows: usize) !void {
         try self.input_embed.forward(io, allocator, out, feats, rows);
     }
 
@@ -205,7 +207,7 @@ pub const Model = struct {
     /// Run the encoder over `x` `(nb, seq, d)` in place. `key_valid` is `(nb, seq)`: a key is
     /// attended only where it is set (patches with an observation, and [REG]). All scratch lives
     /// in a per-call arena over `allocator`.
-    pub fn encode(self: *const Model, io: std.Io, allocator: Allocator, x: []f32, key_valid: []const bool, nb: usize, seq: usize) !void {
+    pub fn encode(self: *const Model, io: Io, allocator: Allocator, x: []f32, key_valid: []const bool, nb: usize, seq: usize) !void {
         var arena_state = std.heap.ArenaAllocator.init(allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -253,7 +255,7 @@ pub const Model = struct {
 
     /// Run the one-token decoder for `nb` series against the encoder output `enc` `(nb, seq, d)`;
     /// writes the final hidden state `(nb, d)` to `out`.
-    pub fn decode(self: *const Model, io: std.Io, allocator: Allocator, out: []f32, enc: []const f32, key_valid: []const bool, nb: usize, seq: usize) !void {
+    pub fn decode(self: *const Model, io: Io, allocator: Allocator, out: []f32, enc: []const f32, key_valid: []const bool, nb: usize, seq: usize) !void {
         var arena_state = std.heap.ArenaAllocator.init(allocator);
         defer arena_state.deinit();
         const arena = arena_state.allocator();
@@ -306,7 +308,7 @@ pub const Model = struct {
     }
 
     /// Quantile head: `(rows, d)` decoder states to `(rows, num_quantiles * prediction_length)`.
-    pub fn outputHead(self: *const Model, io: std.Io, allocator: Allocator, out: []f32, hidden: []const f32, rows: usize) !void {
+    pub fn outputHead(self: *const Model, io: Io, allocator: Allocator, out: []f32, hidden: []const f32, rows: usize) !void {
         try self.output_embed.forward(io, allocator, out, hidden, rows);
     }
 };

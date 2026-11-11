@@ -6,14 +6,16 @@
 //! additive-mask path is not needed.
 
 const std = @import("std");
+const mem = std.mem;
+const Io = std.Io;
 const cfg = @import("config.zig");
 const core = @import("core");
 const nn = core.nn;
 const st = core.safetensors;
 
-const Allocator = std.mem.Allocator;
+const Allocator = mem.Allocator;
 
-const ResBlock = core.resblock.ResBlock;
+const ResBlock = core.resblock.ResBlock(.relu);
 
 const Attn = struct {
     norm: []const f32 = &.{},
@@ -46,10 +48,10 @@ const Layer = struct {
 };
 
 fn tensorName(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
-    return std.fmt.bufPrint(buf, fmt, args) catch unreachable;
+    return mem.print(buf, fmt, args) catch unreachable;
 }
 
-fn loadAttn(io: std.Io, backend: ?nn.Backend, w: *st.Weights, buf: []u8, layer: usize, which: usize, d: usize) !Attn {
+fn loadAttn(io: Io, backend: ?nn.Backend, w: *st.Weights, buf: []u8, layer: usize, which: usize, d: usize) !Attn {
     // A private prefix buffer: `buf` is reused for the tensor names below.
     var pbuf: [128]u8 = undefined;
     const p = tensorName(&pbuf, "encoder.block.{d}.layer.{d}.", .{ layer, which });
@@ -72,16 +74,16 @@ pub const Model = struct {
     reg: []const f32,
     inv_freq: []f32,
 
-    pub fn load(io: std.Io, allocator: Allocator, backend: ?nn.Backend, config: cfg.Config, w: *st.Weights) !Model {
+    pub fn load(io: Io, allocator: Allocator, backend: ?nn.Backend, config: cfg.Config, w: *st.Weights) !Model {
         const d: usize = config.d_model;
         const ps: usize = config.chronos_config.input_patch_size;
         const hid: usize = config.d_ff;
         const q: usize = config.numQuantiles();
         var buf: [256]u8 = undefined;
 
-        const input_embed = try ResBlock.load(io, backend, w, &buf, "input_patch_embedding", 3 * ps, hid, d);
+        const input_embed = try ResBlock.load(io, backend, w, &buf, "input_patch_embedding", 3 * ps, hid, d, true);
         errdefer input_embed.deinit();
-        const output_embed = try ResBlock.load(io, backend, w, &buf, "output_patch_embedding", d, hid, q * ps);
+        const output_embed = try ResBlock.load(io, backend, w, &buf, "output_patch_embedding", d, hid, q * ps, true);
         errdefer output_embed.deinit();
         const final_norm = try w.get(io, "encoder.final_layer_norm.weight", d);
         const shared = try w.get(io, "shared.weight", 2 * d);
@@ -131,7 +133,7 @@ pub const Model = struct {
     }
 
     /// Embed `(rows, 3 * patch_size)` patch features with the input residual block.
-    pub fn embed(self: *const Model, io: std.Io, allocator: Allocator, out: []f32, feats: []const f32, rows: usize) !void {
+    pub fn embed(self: *const Model, io: Io, allocator: Allocator, out: []f32, feats: []const f32, rows: usize) !void {
         try self.input_embed.forward(io, allocator, out, feats, rows);
     }
 
@@ -141,7 +143,7 @@ pub const Model = struct {
     /// when this returns and any allocator is safe to pass.
     pub fn encode(
         self: *const Model,
-        io: std.Io,
+        io: Io,
         allocator: Allocator,
         x: []f32,
         key_valid: []const bool,
@@ -205,7 +207,7 @@ pub const Model = struct {
 
     fn timeAttention(
         self: *const Model,
-        io: std.Io,
+        io: Io,
         out: []f32,
         xn: []const f32,
         a: Attn,
@@ -260,14 +262,14 @@ pub const Model = struct {
     }
 
     /// Group attention with singleton groups: `x + o(v(norm(x)))` per token.
-    fn groupAttention(self: *const Model, io: std.Io, out: []f32, xn: []const f32, a: Attn, vb: []f32, rows: usize) void {
+    fn groupAttention(self: *const Model, io: Io, out: []f32, xn: []const f32, a: Attn, vb: []f32, rows: usize) void {
         const d: usize = self.config.d_model;
         nn.linear(io, vb, xn, rows, a.v, d, d, null);
         nn.linear(io, out, vb, rows, a.o, d, d, null);
     }
 
     /// Quantile head on the last `n_out` tokens of each series: `(rows, num_quantiles * patch_size)`.
-    pub fn outputHead(self: *const Model, io: std.Io, allocator: Allocator, out: []f32, hidden: []const f32, rows: usize) !void {
+    pub fn outputHead(self: *const Model, io: Io, allocator: Allocator, out: []f32, hidden: []const f32, rows: usize) !void {
         try self.output_embed.forward(io, allocator, out, hidden, rows);
     }
 };

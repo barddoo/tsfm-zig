@@ -7,9 +7,11 @@
 //! does.
 
 const std = @import("std");
+const mem = std.mem;
+const Io = std.Io;
 const model_mod = @import("model.zig");
 
-const Allocator = std.mem.Allocator;
+const Allocator = mem.Allocator;
 const Model = model_mod.Model;
 
 /// `InstanceNorm`'s replacement for a zero scale.
@@ -17,7 +19,7 @@ const norm_eps: f32 = 1e-5;
 
 /// Forecast `horizon` steps after `inputs` `(b, t_in)` (NaN = missing). Returns `(b, horizon, Q)`
 /// quantiles in the model's own quantile order. Series are independent.
-pub fn forecast(allocator: Allocator, io: std.Io, model: *const Model, inputs: []const f32, b: usize, t_in: usize, horizon: usize) ![]f32 {
+pub fn forecast(allocator: Allocator, io: Io, model: *const Model, inputs: []const f32, b: usize, t_in: usize, horizon: usize) ![]f32 {
     const c = model.config;
     const q = c.numQuantiles();
     const P: usize = c.chronos_config.prediction_length;
@@ -66,7 +68,7 @@ pub fn forecast(allocator: Allocator, io: std.Io, model: *const Model, inputs: [
         for (0..b) |s| {
             for (0..P) |p| {
                 for (0..q * q) |k| samples[k] = raw[(s * q * q + k) * P + p];
-                std.mem.sort(f32, samples, {}, std.sort.asc(f32));
+                mem.sort(f32, samples, {}, std.sort.asc(f32));
                 for (0..q) |qi| pred[(s * q + qi) * P + p] = quantileLinear(samples, levels[qi]);
             }
         }
@@ -109,7 +111,7 @@ fn chunkSize(n: usize, seq: usize, d: usize, ff: usize) usize {
 
 /// One encoder/decoder pass for `n` series. Row `s` of the context is
 /// `ctx[s * stride + offset ..][0..len]`; `out` is `(n, q, P)`.
-pub fn predictBlock(allocator: Allocator, io: std.Io, model: *const Model, out: []f32, ctx: []const f32, stride: usize, offset: usize, len: usize, n: usize) !void {
+pub fn predictBlock(allocator: Allocator, io: Io, model: *const Model, out: []f32, ctx: []const f32, stride: usize, offset: usize, len: usize, n: usize) !void {
     const c = model.config;
     const ps: usize = c.chronos_config.input_patch_size;
     const n_patch = (len + ps - 1) / ps;
@@ -123,7 +125,7 @@ pub fn predictBlock(allocator: Allocator, io: std.Io, model: *const Model, out: 
     }
 }
 
-fn runChunk(allocator: Allocator, io: std.Io, model: *const Model, out: []f32, ctx: []const f32, stride: usize, offset: usize, len: usize, s0: usize, s1: usize) !void {
+fn runChunk(allocator: Allocator, io: Io, model: *const Model, out: []f32, ctx: []const f32, stride: usize, offset: usize, len: usize, s0: usize, s1: usize) !void {
     const c = model.config;
     const d: usize = c.d_model;
     const ps: usize = c.chronos_config.input_patch_size;

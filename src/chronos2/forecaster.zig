@@ -2,16 +2,18 @@
 //! the encoder pass and the inverse scaling of the quantile head.
 
 const std = @import("std");
+const mem = std.mem;
+const Io = std.Io;
 const model_mod = @import("model.zig");
 
-const Allocator = std.mem.Allocator;
+const Allocator = mem.Allocator;
 const Model = model_mod.Model;
 
 /// Forecast `horizon` steps after `inputs` `(b, t)` (NaN = missing). Returns `(b, horizon, Q)`
 /// quantiles in the model's own quantile order. Series are independent (v1 univariate path).
 pub fn forecast(
     allocator: Allocator,
-    io: std.Io,
+    io: Io,
     model: *const Model,
     inputs: []const f32,
     b: usize,
@@ -55,7 +57,7 @@ fn chunkSize(b: usize, seq: usize, d: usize) usize {
 
 fn runChunk(
     allocator: Allocator,
-    io: std.Io,
+    io: Io,
     model: *const Model,
     out: []f32,
     inputs: []const f32,

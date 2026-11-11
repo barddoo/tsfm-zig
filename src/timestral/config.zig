@@ -1,6 +1,7 @@
 //! Inference configuration, mirroring `timestral.config.TimestralConfig`.
 
 const std = @import("std");
+const mem = std.mem;
 
 pub const Config = struct {
     patch_size: u32,
@@ -91,16 +92,16 @@ pub const Axes = struct {
 };
 
 pub fn layerAxes(kind: []const u8) !Axes {
-    if (std.mem.eql(u8, kind, "time")) return .{ .is_time = .{ true, false }, .len = 1 };
-    if (std.mem.eql(u8, kind, "variate")) return .{ .is_time = .{ false, false }, .len = 1 };
-    if (std.mem.eql(u8, kind, "time_variate")) return .{ .is_time = .{ true, false }, .len = 2 };
-    if (std.mem.eql(u8, kind, "variate_time")) return .{ .is_time = .{ false, true }, .len = 2 };
+    if (mem.eql(u8, kind, "time")) return .{ .is_time = .{ true, false }, .len = 1 };
+    if (mem.eql(u8, kind, "variate")) return .{ .is_time = .{ false, false }, .len = 1 };
+    if (mem.eql(u8, kind, "time_variate")) return .{ .is_time = .{ true, false }, .len = 2 };
+    if (mem.eql(u8, kind, "variate_time")) return .{ .is_time = .{ false, true }, .len = 2 };
     return error.UnknownLayerKind;
 }
 
 pub const Parsed = std.json.Parsed(Config);
 
-pub fn parse(allocator: std.mem.Allocator, text: []const u8) !Parsed {
+pub fn parse(allocator: mem.Allocator, text: []const u8) !Parsed {
     const parsed = try std.json.parseFromSlice(Config, allocator, text, .{ .ignore_unknown_fields = true });
     errdefer parsed.deinit();
     try parsed.value.validate();
@@ -109,7 +110,7 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) !Parsed {
 
 /// Whether `config.json` describes a Timestral checkpoint. Timestral configs carry no
 /// `architectures` entry, so it is recognized by its own required keys.
-pub fn isTimestral(allocator: std.mem.Allocator, text: []const u8) !bool {
+pub fn isTimestral(allocator: mem.Allocator, text: []const u8) !bool {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return false;

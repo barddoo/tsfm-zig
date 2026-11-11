@@ -1,7 +1,8 @@
 //! Series input: blank-line-separated blocks of equal-length rows, as read from a CSV file.
 
 const std = @import("std");
-const sys = @import("sys.zig");
+const mem = std.mem;
+const Io = std.Io;
 
 /// A file of blank-line-separated blocks of equal-length rows, as `(blocks, rows, len)` float64.
 pub const Blocks = struct {
@@ -12,12 +13,12 @@ pub const Blocks = struct {
 };
 
 fn parseValue(tok: []const u8) f64 {
-    const s = std.mem.trim(u8, tok, " \t\r");
+    const s = mem.trim(u8, tok, " \t\r");
     if (s.len == 0) return std.math.nan(f64);
     return std.fmt.parseFloat(f64, s) catch std.math.nan(f64);
 }
 
-pub fn parseBlocks(allocator: std.mem.Allocator, text: []const u8) !Blocks {
+pub fn parseBlocks(allocator: mem.Allocator, text: []const u8) !Blocks {
     var vals: std.ArrayList(f64) = .empty;
     errdefer vals.deinit(allocator);
     var blocks: usize = 0;
@@ -26,9 +27,9 @@ pub fn parseBlocks(allocator: std.mem.Allocator, text: []const u8) !Blocks {
     var len: usize = 0;
     var have_len = false;
 
-    var it = std.mem.splitScalar(u8, text, '\n');
+    var it = mem.splitScalar(u8, text, '\n');
     while (it.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
+        const line = mem.trim(u8, raw, " \t\r");
         if (line.len > 0 and line[0] == '#') continue;
         if (line.len == 0) {
             // A blank line closes the current block.
@@ -40,11 +41,11 @@ pub fn parseBlocks(allocator: std.mem.Allocator, text: []const u8) !Blocks {
             continue;
         }
         const before = vals.items.len;
-        if (std.mem.indexOfScalar(u8, line, ',') != null) {
-            var f = std.mem.splitScalar(u8, line, ',');
+        if (mem.indexOfScalar(u8, line, ',') != null) {
+            var f = mem.splitScalar(u8, line, ',');
             while (f.next()) |tok| try vals.append(allocator, parseValue(tok));
         } else {
-            var f = std.mem.tokenizeAny(u8, line, " \t");
+            var f = mem.tokenizeAny(u8, line, " \t");
             while (f.next()) |tok| try vals.append(allocator, parseValue(tok));
         }
         const n = vals.items.len - before;
@@ -64,24 +65,24 @@ pub fn parseBlocks(allocator: std.mem.Allocator, text: []const u8) !Blocks {
     return .{ .data = try vals.toOwnedSlice(allocator), .blocks = blocks, .rows = rows, .len = len };
 }
 
-pub fn loadBlocks(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Blocks {
-    const text = try sys.readFile(io, allocator, path);
+pub fn loadBlocks(io: Io, allocator: mem.Allocator, path: []const u8) !Blocks {
+    const text = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
     defer allocator.free(text);
     return parseBlocks(allocator, text);
 }
 
-pub fn toF32(allocator: std.mem.Allocator, x: []const f64) ![]f32 {
+pub fn toF32(allocator: mem.Allocator, x: []const f64) ![]f32 {
     const out = try allocator.alloc(f32, x.len);
     for (out, x) |*o, v| o.* = @floatCast(v);
     return out;
 }
 
 /// A covariate file, checked against the series: one block per series, rows of `len` values.
-pub fn covariateFile(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8, batch: usize, len: usize, what: []const u8) !?Blocks {
+pub fn covariateFile(io: Io, allocator: mem.Allocator, path: ?[]const u8, batch: usize, len: usize, what: []const u8) !?Blocks {
     const p = path orelse return null;
     const blk = try loadBlocks(io, allocator, p);
     if (blk.blocks != batch or blk.len != len) {
-        sys.eprintf(io, "{s}: expected {d} series with {d} values per line, got {d} series with {d}\n", .{ what, batch, len, blk.blocks, blk.len });
+        std.debug.print("{s}: expected {d} series with {d} values per line, got {d} series with {d}\n", .{ what, batch, len, blk.blocks, blk.len });
         return error.CovariateShape;
     }
     return blk;

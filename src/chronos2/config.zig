@@ -1,6 +1,7 @@
 //! Chronos-2 inference configuration, parsed from the checkpoint's `config.json`.
 
 const std = @import("std");
+const mem = std.mem;
 const core = @import("core");
 
 pub const architecture = "Chronos2Model";
@@ -48,7 +49,7 @@ pub const Config = struct {
         if (ch.input_patch_stride != ch.input_patch_size) return error.InvalidConfig;
         if (ch.context_length == 0 or ch.max_output_patches == 0) return error.InvalidConfig;
         if (ch.quantiles.len == 0) return error.InvalidConfig;
-        if (!std.mem.eql(u8, self.dense_act_fn, "relu")) return error.UnsupportedActivation;
+        if (!mem.eql(u8, self.dense_act_fn, "relu")) return error.UnsupportedActivation;
         if (!ch.use_reg_token) return error.UnsupportedConfig;
         if (ch.time_encoding_scale <= 0 or self.layer_norm_epsilon <= 0) return error.InvalidConfig;
     }
@@ -56,7 +57,7 @@ pub const Config = struct {
 
 pub const Parsed = std.json.Parsed(Config);
 
-pub fn parse(allocator: std.mem.Allocator, text: []const u8) !Parsed {
+pub fn parse(allocator: mem.Allocator, text: []const u8) !Parsed {
     const parsed = try std.json.parseFromSlice(Config, allocator, text, .{ .ignore_unknown_fields = true });
     errdefer parsed.deinit();
     try parsed.value.validate();
@@ -66,6 +67,6 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) !Parsed {
 /// Whether `config.json` describes a Chronos-2 checkpoint (`architectures` contains
 /// `Chronos2Model`). Malformed configs (not a JSON object, `architectures` not an array) are
 /// simply not Chronos-2.
-pub fn isChronos2(allocator: std.mem.Allocator, text: []const u8) !bool {
+pub fn isChronos2(allocator: mem.Allocator, text: []const u8) !bool {
     return core.family.hasArchitecture(allocator, text, architecture);
 }

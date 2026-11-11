@@ -6,22 +6,15 @@
 //! series), `N` patches, `D` channels, stored `[R][N][D]`. Rows of one series are contiguous.
 
 const std = @import("std");
+const mem = std.mem;
+const Io = std.Io;
 const cfg = @import("config.zig");
 const core = @import("core");
 const nn = core.nn;
 const st = core.safetensors;
 const par = core.par;
 
-const Allocator = std.mem.Allocator;
-
-const Linear = struct {
-    w: nn.Weight = .{},
-    b: ?[]const f32 = null,
-
-    fn deinit(self: *const Linear) void {
-        self.w.deinit();
-    }
-};
+const Allocator = mem.Allocator;
 
 const Attn = struct {
     is_time: bool = false,
@@ -67,56 +60,10 @@ const Layer = struct {
     }
 };
 
-const ResBlock = struct {
-    hidden: Linear = .{},
-    output: Linear = .{},
-    residual: Linear = .{},
-    in: usize = 0,
-    hid: usize = 0,
-    out: usize = 0,
-
-    fn load(io: std.Io, backend: ?nn.Backend, w: *st.Weights, buf: []u8, prefix: []const u8, in: usize, hid: usize, out: usize, bias: bool) !ResBlock {
-        var block: ResBlock = .{ .in = in, .hid = hid, .out = out };
-        errdefer block.deinit();
-        block.hidden = try loadLinear(io, backend, w, buf, prefix, "hidden_layer", hid, in, bias);
-        block.output = try loadLinear(io, backend, w, buf, prefix, "output_layer", out, hid, bias);
-        block.residual = try loadLinear(io, backend, w, buf, prefix, "residual_layer", out, in, bias);
-        return block;
-    }
-
-    fn deinit(self: *const ResBlock) void {
-        self.hidden.deinit();
-        self.output.deinit();
-        self.residual.deinit();
-    }
-
-    /// `output(silu(hidden(x))) + residual(x)` for `rows` input vectors.
-    fn forward(self: ResBlock, io: std.Io, allocator: Allocator, y: []f32, x: []const f32, rows: usize) !void {
-        const h = try allocator.alloc(f32, rows * self.hid);
-        defer allocator.free(h);
-        nn.linear(io, h, x, rows, self.hidden.w, self.hid, self.in, self.hidden.b);
-        nn.siluInPlace(h);
-        nn.linear(io, y, h, rows, self.output.w, self.out, self.hid, self.output.b);
-        const r = try allocator.alloc(f32, rows * self.out);
-        defer allocator.free(r);
-        nn.linear(io, r, x, rows, self.residual.w, self.out, self.in, self.residual.b);
-        nn.addInPlace(y[0 .. rows * self.out], r);
-    }
-};
+const ResBlock = core.resblock.ResBlock(.silu);
 
 fn tensorName(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
-    return std.fmt.bufPrint(buf, fmt, args) catch unreachable;
-}
-
-fn loadLinear(io: std.Io, backend: ?nn.Backend, w: *st.Weights, buf: []u8, prefix: []const u8, name: []const u8, out: usize, in: usize, bias: bool) !Linear {
-    const wn = tensorName(buf, "{s}.{s}.weight", .{ prefix, name });
-    const weight = try w.get(io, wn, out * in);
-    var bv: ?[]const f32 = null;
-    if (bias) {
-        const bn = tensorName(buf, "{s}.{s}.bias", .{ prefix, name });
-        bv = try w.get(io, bn, out);
-    }
-    return .{ .w = nn.Weight.initWith(backend, weight), .b = bv };
+    return mem.print(buf, fmt, args) catch unreachable;
 }
 
 /// The checkpoint stores the fused projection rows as `(qkv, head_dim, heads)`. Reorder them to
@@ -186,7 +133,7 @@ pub const Model = struct {
     head: ResBlock,
     inv_freq: []f32, // head_dim / 2 entries; zero past rope_dim / 2 (identity rotation)
 
-    pub fn load(io: std.Io, allocator: Allocator, backend: ?nn.Backend, config: cfg.Config, w: *st.Weights) !Model {
+    pub fn load(io: Io, allocator: Allocator, backend: ?nn.Backend, config: cfg.Config, w: *st.Weights) !Model {
         const d: usize = config.d_model;
         const ps: usize = config.patch_size;
         const hid: usize = config.mlp_hidden_dim;
@@ -217,7 +164,7 @@ pub const Model = struct {
                 const hd: usize = config.headDim();
                 a.qkv = nn.Weight.initWith(backend, try permuteQkv(allocator, try w.get(io, tensorName(&buf, "transformer.layers.{d}.attns.{d}.wQKV.weight", .{ li, ai }), 3 * d * d), d, nh, hd));
                 a.out = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "transformer.layers.{d}.attns.{d}.wO.weight", .{ li, ai }), d * d));
-                a.gate = if (std.mem.eql(u8, gate_kind, "sdpa_sigmoid"))
+                a.gate = if (mem.eql(u8, gate_kind, "sdpa_sigmoid"))
                     nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "transformer.layers.{d}.attns.{d}._gate.weight", .{ li, ai }), d * d))
                 else
                     null;
@@ -263,14 +210,14 @@ pub const Model = struct {
     /// Per-patch causal `(loc, scale)` of packed `(R, T)` rows, each `(R, T / patch_size)`.
     /// Each patch uses the running mean/std (float64 Welford) of everything observed up to
     /// its last step, then both are rounded to float32.
-    pub fn patchStats(self: *const Model, io: std.Io, loc: []f32, scale: []f32, data: []const f32, observed: []const bool, rows: usize, t: usize) void {
+    pub fn patchStats(self: *const Model, io: Io, loc: []f32, scale: []f32, data: []const f32, observed: []const bool, rows: usize, t: usize) void {
         const job: StatsJob = .{ .model = self, .loc = loc, .scale = scale, .data = data, .observed = observed, .t = t };
         par.forRangeMin(io, rows, 4, &job, StatsJob.run);
     }
 
     /// Quantiles `(T, h * patch_size, Q)` in data units for the target rows after the packed
     /// context, `T` being the number of target rows (series by series, in `roles` order).
-    pub fn predictBlock(self: *const Model, io: std.Io, allocator: Allocator, out: []f32, in: BlockInput) !void {
+    pub fn predictBlock(self: *const Model, io: Io, allocator: Allocator, out: []f32, in: BlockInput) !void {
         const c = self.config;
         const ps: usize = c.patch_size;
         const d: usize = c.d_model;
@@ -476,7 +423,7 @@ pub const Model = struct {
         }
     }
 
-    fn runTransformer(self: *const Model, io: std.Io, arena: Allocator, x: []f32, geo: Geo) !void {
+    fn runTransformer(self: *const Model, io: Io, arena: Allocator, x: []f32, geo: Geo) !void {
         const c = self.config;
         const d: usize = c.d_model;
         const sl = geo.s();
@@ -529,7 +476,7 @@ pub const Model = struct {
     /// Time attention per row over `[Enc ; Dec]`. Encoder queries read valid encoder keys
     /// causally (diagonal always open); known-future rows read all valid keys. Decoder queries
     /// read the valid context keys and their own causal decoder chain.
-    fn timeAttention(self: *const Model, io: std.Io, arena: Allocator, out: []f32, xn: []const f32, a: Attn, geo: Geo, cos_t: []const f32, sin_t: []const f32) !void {
+    fn timeAttention(self: *const Model, io: Io, arena: Allocator, out: []f32, xn: []const f32, a: Attn, geo: Geo, cos_t: []const f32, sin_t: []const f32) !void {
         const c = self.config;
         const d: usize = c.d_model;
         const rows = geo.rows;
@@ -567,7 +514,7 @@ pub const Model = struct {
     /// reads another row on an encoder slot only if that row's patch is a valid key. With
     /// covariates two firewalls apply: a covariate row never reads a target row, and a
     /// known-future row never reads a causal row. The diagonal is always open.
-    fn variateAttention(self: *const Model, io: std.Io, arena: Allocator, out: []f32, xn: []const f32, a: Attn, geo: Geo) !void {
+    fn variateAttention(self: *const Model, io: Io, arena: Allocator, out: []f32, xn: []const f32, a: Attn, geo: Geo) !void {
         const c = self.config;
         const d: usize = c.d_model;
         const rows = geo.rows;

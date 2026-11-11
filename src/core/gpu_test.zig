@@ -10,6 +10,7 @@
 //! values: a flat `rows * ldc` copy (the original bug) overwrites the padding of adjacent heads.
 
 const std = @import("std");
+const Io = std.Io;
 const gpu = @import("gpu");
 const backend = @import("backend");
 const nn = @import("nn.zig");
@@ -162,7 +163,7 @@ const mock_vtable_high: backend.Backend.VTable = .{
 test "nn dispatch uses the backend above the threshold and the CPU below it" {
     var mock = Mock{};
     const be: nn.Backend = .{ .ptr = &mock, .vtable = &mock_vtable };
-    const io = std.Io.Threaded.global_single_threaded.io();
+    const io = Io.Threaded.global_single_threaded.io();
 
     var wdata: [4 * 3]f32 = undefined;
     for (&wdata, 0..) |*x, i| x.* = @floatFromInt(i + 1);

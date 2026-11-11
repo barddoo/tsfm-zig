@@ -3,6 +3,7 @@
 //! `-Dblas=builtin` build) are register-tiled so a row of B is reused by several rows of A.
 
 const std = @import("std");
+const Io = std.Io;
 const c = @import("c");
 const gpu = @import("gpu");
 const backend_mod = @import("backend");
@@ -257,7 +258,7 @@ fn linearBlocks(ctx: *const LinearCtx, b0: usize, b1: usize) void {
 /// `y[rows, out] = x[rows, in] @ w[out, in]^T`, plus `bias[out]` when given. Large products are
 /// split by output columns across the thread pool. With a GPU backend a registered weight is
 /// multiplied from its permanent buffer; the copy that remains is only the activation and result.
-pub fn linear(io: std.Io, y: []f32, x: []const f32, rows: usize, w: Weight, out: usize, in: usize, bias: ?[]const f32) void {
+pub fn linear(io: Io, y: []f32, x: []const f32, rows: usize, w: Weight, out: usize, in: usize, bias: ?[]const f32) void {
     std.debug.assert(y.len >= rows * out and x.len >= rows * in and w.data.len == out * in);
     if (w.backend) |be| {
         if (w.handle != null and rows * out * in >= be.linearMinOps()) {
@@ -353,7 +354,7 @@ fn rmsNormRows(ctx: *const NormCtx, r0: usize, r1: usize) void {
     rmsNormSerial(ctx.out, ctx.x, r0, r1, ctx.dim, ctx.scale, ctx.eps);
 }
 
-pub fn rmsNorm(io: std.Io, out: []f32, x: []const f32, rows: usize, dim: usize, scale: []const f32, eps: f32) void {
+pub fn rmsNorm(io: Io, out: []f32, x: []const f32, rows: usize, dim: usize, scale: []const f32, eps: f32) void {
     const ctx: NormCtx = .{ .out = out, .x = x, .dim = dim, .scale = scale, .eps = eps };
     par.forRangeMin(io, rows, 64, &ctx, rmsNormRows);
 }

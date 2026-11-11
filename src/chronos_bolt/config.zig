@@ -2,6 +2,7 @@
 //! plus a `chronos_config` block).
 
 const std = @import("std");
+const mem = std.mem;
 const core = @import("core");
 
 pub const architecture = "ChronosBoltModelForForecasting";
@@ -52,7 +53,7 @@ pub const Config = struct {
         if (c.quantiles.len == 0) return error.InvalidConfig;
         // Patches are non-overlapping in every released checkpoint; overlapping ones are not ported.
         if (c.input_patch_stride != c.input_patch_size) return error.UnsupportedPatchStride;
-        if (!std.mem.eql(u8, self.dense_act_fn, "relu")) return error.UnsupportedActivation;
+        if (!mem.eql(u8, self.dense_act_fn, "relu")) return error.UnsupportedActivation;
         if (self.relative_attention_num_buckets < 4 or self.relative_attention_num_buckets % 2 != 0) return error.InvalidConfig;
         if (self.reg_token_id >= self.vocabSize() or self.decoder_start_token_id >= self.vocabSize()) return error.InvalidConfig;
     }
@@ -60,13 +61,13 @@ pub const Config = struct {
 
 pub const Parsed = std.json.Parsed(Config);
 
-pub fn parse(allocator: std.mem.Allocator, text: []const u8) !Parsed {
+pub fn parse(allocator: mem.Allocator, text: []const u8) !Parsed {
     const parsed = try std.json.parseFromSlice(Config, allocator, text, .{ .ignore_unknown_fields = true });
     errdefer parsed.deinit();
     try parsed.value.validate();
     return parsed;
 }
 
-pub fn isChronosBolt(allocator: std.mem.Allocator, text: []const u8) !bool {
+pub fn isChronosBolt(allocator: mem.Allocator, text: []const u8) !bool {
     return core.family.hasArchitecture(allocator, text, architecture);
 }

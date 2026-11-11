@@ -7,12 +7,14 @@
 //! known-future covariate rows. Rows of one series are contiguous in that order.
 
 const std = @import("std");
+const mem = std.mem;
+const Io = std.Io;
 const model_mod = @import("model.zig");
 const core = @import("core");
 const nn = core.nn;
 const par = core.par;
 
-const Allocator = std.mem.Allocator;
+const Allocator = mem.Allocator;
 const Model = model_mod.Model;
 const Role = model_mod.Role;
 
@@ -54,7 +56,7 @@ const Rows = struct {
 /// the same shape. Returns `(B, V, horizon, Q)` quantiles; the caller frees the slice.
 pub fn forecast(
     allocator: Allocator,
-    io: std.Io,
+    io: Io,
     model: *const Model,
     inputs: []const f32,
     observed: []const bool,
@@ -134,7 +136,7 @@ pub fn forecast(
 
 const Pass = struct {
     allocator: Allocator,
-    io: std.Io,
+    io: Io,
     model: *const Model,
     inputs: []const f32,
     observed: []const bool,
@@ -245,7 +247,7 @@ fn targetEncode(allocator: Allocator, target: []const f64, past: []const f64, fu
     var cats: std.ArrayList(f64) = .empty;
     defer cats.deinit(allocator);
     for (past) |cv| if (std.math.isFinite(cv)) try cats.append(allocator, cv);
-    std.mem.sort(f64, cats.items, {}, std.sort.asc(f64));
+    mem.sort(f64, cats.items, {}, std.sort.asc(f64));
     var nc: usize = 0;
     for (cats.items, 0..) |cv, i| {
         if (i == 0 or cv != cats.items[nc - 1]) {
@@ -294,7 +296,7 @@ fn slotOf(categories: []const f64, code: f64) ?usize {
 
 fn forecastRaw(
     allocator: Allocator,
-    io: std.Io,
+    io: Io,
     model: *const Model,
     inputs: []const f32,
     observed: []const bool,
@@ -413,7 +415,7 @@ fn forecastRaw(
 }
 
 fn blockDecode(
-    io: std.Io,
+    io: Io,
     allocator: Allocator,
     model: *const Model,
     out: []f32,
@@ -446,28 +448,33 @@ fn blockDecode(
     var cmask = try allocator.dupe(bool, mask);
     defer allocator.free(cmask);
 
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+
     var remaining = (horizon + ps - 1) / ps;
     var done: usize = 0; // decoded steps so far
     while (remaining > 0) {
+        // Everything allocated for this block (the decoded block, known-future slices, and the
+        // model's per-forward scratch) is released by one reset at the end of the iteration.
+        defer _ = arena_state.reset(.retain_capacity);
+        const arena = arena_state.allocator();
+
         const block = @min(o.per_shot_horizon_patches, remaining);
         const blen = block * ps;
-        const qs = try allocator.alloc(f32, nt * blen * q);
-        defer allocator.free(qs);
+        const qs = try arena.alloc(f32, nt * blen * q);
 
         var kfb: ?[]f32 = null;
         var kfmb: ?[]bool = null;
         if (kf) |kfv| {
-            kfb = try allocator.alloc(f32, nrows * blen);
-            kfmb = try allocator.alloc(bool, nrows * blen);
+            kfb = try arena.alloc(f32, nrows * blen);
+            kfmb = try arena.alloc(bool, nrows * blen);
             for (0..nrows) |r| {
                 @memcpy(kfb.?[r * blen ..][0..blen], kfv[r * hpad + done ..][0..blen]);
                 @memcpy(kfmb.?[r * blen ..][0..blen], kfm.?[r * hpad + done ..][0..blen]);
             }
         }
-        defer if (kfb) |x| allocator.free(x);
-        defer if (kfmb) |x| allocator.free(x);
 
-        try model.predictBlock(io, allocator, qs, .{
+        try model.predictBlock(io, arena, qs, .{
             .ctx = ctx,
             .obs = cmask,
             .t = t,
@@ -477,7 +484,7 @@ fn blockDecode(
             .known_future = kfb,
             .known_future_obs = kfmb,
         });
-        if (block > 1) try refineBlock(io, allocator, model, qs, ctx, cmask, groups, vall, v, t, block);
+        if (block > 1) try refineBlock(io, arena, model, qs, ctx, cmask, groups, vall, v, t, block);
 
         for (0..nt) |r| {
             for (0..blen) |s| {
@@ -556,7 +563,7 @@ fn welfordCombine(a: Welford, b: Welford) Welford {
 /// Moves a decoded block `(T, h * patch_size, Q)` of the target rows from the anchor frame of
 /// the last context patch to the advancing refine frame it was trained in: horizon patch `j` is
 /// normalized with the statistics of the context plus the block's medians of patches `0..j-1`.
-fn refineBlock(io: std.Io, allocator: Allocator, model: *const Model, qs: []f32, ctx: []const f32, mask: []const bool, groups: usize, vall: usize, v: usize, t: usize, h: usize) !void {
+fn refineBlock(io: Io, allocator: Allocator, model: *const Model, qs: []f32, ctx: []const f32, mask: []const bool, groups: usize, vall: usize, v: usize, t: usize, h: usize) !void {
     const c = model.config;
     const ps: usize = c.patch_size;
     const q = c.numQuantiles();

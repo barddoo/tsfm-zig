@@ -11,6 +11,8 @@
 //! a `config.json` that no family claims is an error, not a guess.
 
 const std = @import("std");
+const mem = std.mem;
+const Io = std.Io;
 const safetensors = @import("safetensors.zig");
 
 /// Covariate files (Timestral-style); a family that has no covariates rejects any that are set.
@@ -35,10 +37,10 @@ pub const Options = struct {
 };
 
 pub const Request = struct {
-    io: std.Io,
+    io: Io,
     /// `io` when multi-threaded, else the single-threaded `Io`; handed to the layers.
-    par_io: std.Io,
-    allocator: std.mem.Allocator,
+    par_io: Io,
+    allocator: mem.Allocator,
     model_dir: []const u8,
     config_text: []const u8,
     series_path: []const u8,
@@ -56,10 +58,10 @@ pub const Forecast = struct {
     series: usize,
     variates: usize,
     horizon: usize,
-    /// `sys.now` once the weights were loaded and just before forecasting starts.
+    /// The monotonic clock once the weights were loaded and just before forecasting starts.
     t_loaded: f64,
 
-    pub fn deinit(self: Forecast, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: Forecast, allocator: mem.Allocator) void {
         allocator.free(self.levels);
         allocator.free(self.values);
     }
@@ -70,7 +72,7 @@ fn checkFamily(comptime F: type) void {
     if (!@hasDecl(F, "matches")) @compileError("model family '" ++ F.name ++ "' is missing `matches`");
     if (!@hasDecl(F, "run")) @compileError("model family '" ++ F.name ++ "' is missing `run`");
     const m = @typeInfo(@TypeOf(F.matches)).@"fn";
-    if (m.param_types.len != 2 or m.param_types[0] != std.mem.Allocator or m.param_types[1] != []const u8)
+    if (m.param_types.len != 2 or m.param_types[0] != mem.Allocator or m.param_types[1] != []const u8)
         @compileError("'" ++ F.name ++ "'.matches must be fn (Allocator, []const u8) !bool");
     const r = @typeInfo(@TypeOf(F.run)).@"fn";
     if (r.param_types.len != 1 or r.param_types[0] != *const Request)
@@ -89,7 +91,7 @@ pub fn Registry(comptime families: anytype) type {
         };
 
         /// The name of the family that claims this `config.json`, or null.
-        pub fn detect(allocator: std.mem.Allocator, config_text: []const u8) !?[]const u8 {
+        pub fn detect(allocator: mem.Allocator, config_text: []const u8) !?[]const u8 {
             inline for (families) |F| {
                 if (try F.matches(allocator, config_text)) return F.name;
             }
@@ -108,14 +110,14 @@ pub fn Registry(comptime families: anytype) type {
 
 /// Whether `config.json` lists `architecture` in its `architectures` array. A convenience for
 /// families that are identified that way.
-pub fn hasArchitecture(allocator: std.mem.Allocator, config_text: []const u8, architecture: []const u8) !bool {
+pub fn hasArchitecture(allocator: mem.Allocator, config_text: []const u8, architecture: []const u8) !bool {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, config_text, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return false;
     const arch = parsed.value.object.get("architectures") orelse return false;
     if (arch != .array) return false;
     for (arch.array.items) |item| {
-        if (item == .string and std.mem.eql(u8, item.string, architecture)) return true;
+        if (item == .string and mem.eql(u8, item.string, architecture)) return true;
     }
     return false;
 }
@@ -124,8 +126,8 @@ test "registry dispatches to the family that claims the config, and errors other
     const a = std.testing.allocator;
     const A = struct {
         pub const name = "A";
-        pub fn matches(_: std.mem.Allocator, text: []const u8) !bool {
-            return std.mem.indexOf(u8, text, "\"a\"") != null;
+        pub fn matches(_: mem.Allocator, text: []const u8) !bool {
+            return mem.indexOf(u8, text, "\"a\"") != null;
         }
         pub fn run(_: *const Request) !Forecast {
             return error.RanA;
@@ -133,8 +135,8 @@ test "registry dispatches to the family that claims the config, and errors other
     };
     const B = struct {
         pub const name = "B";
-        pub fn matches(_: std.mem.Allocator, text: []const u8) !bool {
-            return std.mem.indexOf(u8, text, "\"b\"") != null;
+        pub fn matches(_: mem.Allocator, text: []const u8) !bool {
+            return mem.indexOf(u8, text, "\"b\"") != null;
         }
         pub fn run(_: *const Request) !Forecast {
             return error.RanB;
