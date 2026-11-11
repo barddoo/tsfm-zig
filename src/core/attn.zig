@@ -33,6 +33,8 @@ pub const Strides = struct { q: usize, k: usize, v: usize, o: usize };
 
 /// Mask and softmax the `n x n` score matrix in place (row stride `n`).
 pub inline fn maskedSoftmax(comptime mask: Mask, scores: []f32, n: usize, key_valid: []const bool) void {
+    std.debug.assert(scores.len >= n * n);
+    if (mask != .full and mask != .causal) std.debug.assert(key_valid.len >= n);
     switch (mask) {
         .full => for (0..n) |i| nn.softmax(scores[i * n ..][0..n]),
         .keys_additive => {
@@ -82,6 +84,11 @@ pub fn selfAttend(
     key_valid: []const bool,
     bias: ?[]const f32,
 ) void {
+    std.debug.assert(scores.len >= n * n);
+    std.debug.assert(st.q >= hd and st.k >= hd and st.v >= hd and st.o >= hd);
+    std.debug.assert(n == 0 or (q.len >= (n - 1) * st.q + hd and k.len >= (n - 1) * st.k + hd and v.len >= (n - 1) * st.v + hd));
+    std.debug.assert(n == 0 or o.len >= (n - 1) * st.o + hd);
+    std.debug.assert(bias == null or bias.?.len >= n * n);
     nn.gemmNT(b, scores, n, q, st.q, k, st.k, n, n, hd, scale);
     if (bias) |bv| nn.addInPlace(scores[0 .. n * n], bv[0 .. n * n]);
     maskedSoftmax(mask, scores, n, key_valid);
@@ -123,6 +130,7 @@ fn allowedRef(mask: Mask, key_valid: []const bool, i: usize, j: usize) bool {
 }
 
 fn referenceAttend(mask: Mask, o: []f64, q: []const f32, k: []const f32, v: []const f32, st: Strides, n: usize, hd: usize, scale: f64, key_valid: []const bool, bias: ?[]const f32) void {
+    std.debug.assert(n <= 64);
     var s: [64]f64 = undefined;
     for (0..n) |i| {
         var mx: f64 = -std.math.inf(f64);

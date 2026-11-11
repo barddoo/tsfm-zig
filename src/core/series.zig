@@ -62,13 +62,17 @@ pub fn parseBlocks(allocator: mem.Allocator, text: []const u8) !Blocks {
         blocks += 1;
     }
     if (blocks == 0 or len == 0) return error.EmptyInput;
+    std.debug.assert(rows > 0);
+    std.debug.assert(vals.items.len == blocks * rows * len);
     return .{ .data = try vals.toOwnedSlice(allocator), .blocks = blocks, .rows = rows, .len = len };
 }
 
 pub fn loadBlocks(io: Io, allocator: mem.Allocator, path: []const u8) !Blocks {
     const text = try Io.Dir.cwd().readFileAlloc(io, path, allocator, .unlimited);
     defer allocator.free(text);
-    return parseBlocks(allocator, text);
+    const blocks = try parseBlocks(allocator, text);
+    std.debug.assert(blocks.data.len == blocks.blocks * blocks.rows * blocks.len);
+    return blocks;
 }
 
 pub fn toF32(allocator: mem.Allocator, x: []const f64) ![]f32 {

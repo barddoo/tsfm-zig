@@ -26,6 +26,7 @@ pub const Mapped = struct {
             .protection = .{ .read = true, .write = false },
             .populate = false,
         });
+        std.debug.assert(len <= map.memory.len);
         return .{ .file = file, .map = map, .bytes = map.memory[0..len] };
     }
 

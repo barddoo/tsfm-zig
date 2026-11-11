@@ -229,6 +229,14 @@ pub const Model = struct {
         const l = t / ps;
         const hl = h * ps;
 
+        std.debug.assert(t % ps == 0);
+        std.debug.assert(rows == in.groups * vall);
+        std.debug.assert(in.ctx.len >= rows * t and in.obs.len >= rows * t);
+        std.debug.assert(h > 0 and h <= c.block_size);
+        std.debug.assert(d % c.num_heads == 0);
+        if (in.known_future) |known| std.debug.assert(known.len >= rows * hl);
+        if (in.known_future_obs) |known| std.debug.assert(known.len >= rows * hl);
+
         var cov = false;
         var n_tgt: usize = 0;
         for (in.roles) |role| {

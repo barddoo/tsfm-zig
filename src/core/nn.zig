@@ -47,6 +47,10 @@ pub const Weight = struct {
 /// `C[m, n] = alpha * A[m, k] @ B^T` with B stored `[n, k]`, explicit row strides. `b` is the
 /// execution backend (null selects the CPU); attention passes the model's backend here.
 pub fn gemmNT(b: ?Backend, cc: []f32, ldc: usize, a: []const f32, lda: usize, bmat: []const f32, ldb: usize, m: usize, n: usize, k: usize, alpha: f32) void {
+    std.debug.assert(lda >= k and ldb >= k and ldc >= n);
+    std.debug.assert(m == 0 or cc.len >= (m - 1) * ldc + n);
+    std.debug.assert(m == 0 or a.len >= (m - 1) * lda + k);
+    std.debug.assert(n == 0 or bmat.len >= (n - 1) * ldb + k);
     if (b) |be| {
         if (m * n * k >= be.activationMinOps()) {
             if (be.sgemmNT(.{ .m = m, .n = n, .k = k, .alpha = alpha, .a = a, .lda = lda, .b = bmat, .ldb = ldb, .out = cc, .ldc = ldc }, null)) return;
@@ -159,6 +163,10 @@ fn gemmNTFallback(cc: []f32, ldc: usize, a: []const f32, lda: usize, b: []const 
 
 /// `C[m, n] = A[m, k] @ B[k, n]` with explicit row strides.
 pub fn gemmNN(be_opt: ?Backend, cc: []f32, ldc: usize, a: []const f32, lda: usize, b: []const f32, ldb: usize, m: usize, n: usize, k: usize) void {
+    std.debug.assert(lda >= k and ldb >= n and ldc >= n);
+    std.debug.assert(m == 0 or cc.len >= (m - 1) * ldc + n);
+    std.debug.assert(m == 0 or a.len >= (m - 1) * lda + k);
+    std.debug.assert(k == 0 or b.len >= (k - 1) * ldb + n);
     if (be_opt) |be| {
         if (m * n * k >= be.activationMinOps()) {
             if (be.sgemmNN(.{ .m = m, .n = n, .k = k, .a = a, .lda = lda, .b = b, .ldb = ldb, .out = cc, .ldc = ldc })) return;
@@ -242,6 +250,7 @@ const LinearCtx = struct {
 
 /// Output columns `[j0, j1)` of a linear layer; the weight rows of those columns are contiguous.
 fn linearCols(ctx: *const LinearCtx, j0: usize, j1: usize) void {
+    std.debug.assert(j0 <= j1 and j1 <= ctx.out and ctx.y.len >= j0);
     gemmNTWeight(ctx.y[j0..], ctx.out, ctx.x, ctx.in, ctx.w.data[j0 * ctx.in ..], ctx.in, ctx.rows, j1 - j0, ctx.in, 1.0);
     if (ctx.bias) |b| {
         for (0..ctx.rows) |r| addInPlace(ctx.y[r * ctx.out + j0 ..][0 .. j1 - j0], b[j0..j1]);
@@ -260,6 +269,7 @@ fn linearBlocks(ctx: *const LinearCtx, b0: usize, b1: usize) void {
 /// multiplied from its permanent buffer; the copy that remains is only the activation and result.
 pub fn linear(io: Io, y: []f32, x: []const f32, rows: usize, w: Weight, out: usize, in: usize, bias: ?[]const f32) void {
     std.debug.assert(y.len >= rows * out and x.len >= rows * in and w.data.len == out * in);
+    std.debug.assert(bias == null or bias.?.len >= out);
     if (w.backend) |be| {
         if (w.handle != null and rows * out * in >= be.linearMinOps()) {
             // The backend handles internal parallelism; column-blocking would create multiple
@@ -355,6 +365,8 @@ fn rmsNormRows(ctx: *const NormCtx, r0: usize, r1: usize) void {
 }
 
 pub fn rmsNorm(io: Io, out: []f32, x: []const f32, rows: usize, dim: usize, scale: []const f32, eps: f32) void {
+    std.debug.assert(dim > 0 and scale.len >= dim);
+    std.debug.assert(out.len >= rows * dim and x.len >= rows * dim);
     const ctx: NormCtx = .{ .out = out, .x = x, .dim = dim, .scale = scale, .eps = eps };
     par.forRangeMin(io, rows, 64, &ctx, rmsNormRows);
 }
@@ -396,6 +408,7 @@ pub fn siluInPlace(x: []f32) void {
 
 /// `dst[i] = gate[i] * silu(up[i])`.
 pub fn mulSilu(dst: []f32, gate: []const f32, up: []const f32) void {
+    std.debug.assert(gate.len >= dst.len and up.len >= dst.len);
     const one: Vec = @splat(1.0);
     var i: usize = 0;
     while (i + lanes <= dst.len) : (i += lanes) {
@@ -408,6 +421,7 @@ pub fn mulSilu(dst: []f32, gate: []const f32, up: []const f32) void {
 
 /// `dst[i] = x[i] * sigmoid(g[i])`.
 pub fn mulSigmoid(dst: []f32, x: []const f32, g: []const f32) void {
+    std.debug.assert(x.len >= dst.len and g.len >= dst.len);
     const one: Vec = @splat(1.0);
     var i: usize = 0;
     while (i + lanes <= dst.len) : (i += lanes) {
@@ -454,6 +468,7 @@ pub fn ropeHalf(x: []f32, cos: []const f32, sin: []const f32, half: usize) void 
 
 /// Softmax in place; entries equal to -inf get exactly zero weight.
 pub fn softmax(row: []f32) void {
+    std.debug.assert(row.len > 0);
     const ninf = -std.math.inf(f32);
     const ninfv: Vec = @splat(ninf);
     var mxv: Vec = @splat(ninf);

@@ -47,6 +47,10 @@ pub fn ResBlock(comptime act: Act) type {
             block.hidden = try loadLinear(io, backend, w, buf, prefix, "hidden_layer", hid, in, bias);
             block.output = try loadLinear(io, backend, w, buf, prefix, "output_layer", out, hid, bias);
             block.residual = try loadLinear(io, backend, w, buf, prefix, "residual_layer", out, in, bias);
+            std.debug.assert(block.hidden.w.data.len == hid * in);
+            std.debug.assert(block.output.w.data.len == out * hid);
+            std.debug.assert(block.residual.w.data.len == out * in);
+            std.debug.assert((block.hidden.b != null) == bias);
             return block;
         }
 
@@ -58,6 +62,8 @@ pub fn ResBlock(comptime act: Act) type {
 
         /// `output(act(hidden(x))) + residual(x)` for `rows` input vectors.
         pub fn forward(self: @This(), io: Io, allocator: Allocator, y: []f32, x: []const f32, rows: usize) !void {
+            std.debug.assert(x.len >= rows * self.in and y.len >= rows * self.out);
+            std.debug.assert(self.hid > 0);
             const h = try allocator.alloc(f32, rows * self.hid);
             defer allocator.free(h);
             nn.linear(io, h, x, rows, self.hidden.w, self.hid, self.in, self.hidden.b);

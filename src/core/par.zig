@@ -16,6 +16,7 @@ pub fn forRange(io: Io, n: usize, ctx: anytype, comptime f: anytype) void {
 
 /// As `forRange`, with every chunk at least `min_chunk` items.
 pub fn forRangeMin(io: Io, n: usize, min_chunk: usize, ctx: anytype, comptime f: anytype) void {
+    std.debug.assert(min_chunk > 0);
     const chunks = @min(threads, (n + min_chunk - 1) / @max(min_chunk, 1));
     if (chunks <= 1) return f(ctx, 0, n);
     const size = (n + chunks - 1) / chunks;

@@ -25,6 +25,7 @@ pub fn forecast(
     const q: usize = c.numQuantiles();
     if (b == 0 or t_in == 0) return error.EmptyInput;
     if (horizon == 0 or horizon > c.predictionLength()) return error.HorizonTooLong;
+    std.debug.assert(inputs.len >= b * t_in);
 
     // Truncate the context to the model's window (the most recent steps).
     const t = @min(t_in, @as(usize, c.chronos_config.context_length));

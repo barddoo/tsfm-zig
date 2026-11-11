@@ -35,6 +35,7 @@ pub const Weights = struct {
         if (map.bytes.len < 8) return error.InvalidSafetensors;
         const hlen: usize = @intCast(mem.readInt(u64, map.bytes[0..8], .little));
         if (8 + hlen > map.bytes.len) return error.InvalidSafetensors;
+        std.debug.assert(8 + hlen <= map.bytes.len);
         const header = try std.json.parseFromSlice(std.json.Value, allocator, map.bytes[8 .. 8 + hlen], .{});
         return .{ .allocator = allocator, .map = map, .header = header, .data_start = 8 + hlen };
     }
@@ -66,6 +67,7 @@ pub const Weights = struct {
         const offs = obj.get("data_offsets").?.array.items;
         const begin: usize = @intCast(offs[0].integer);
         const end: usize = @intCast(offs[1].integer);
+        std.debug.assert(begin <= end);
         const elem: usize = if (mem.eql(u8, dtype, "F32")) 4 else if (mem.eql(u8, dtype, "F16") or mem.eql(u8, dtype, "BF16")) 2 else {
             Io.File.stderr().writeStreamingAll(io, mem.print(&err_buf, "tensor {s} has unsupported dtype {s}\n", .{ name, dtype }) catch "") catch {};
             return error.UnsupportedDtype;
@@ -75,8 +77,10 @@ pub const Weights = struct {
             return error.ShapeMismatch;
         }
         const bytes = self.map.bytes[self.data_start + begin ..][0 .. end - begin];
+        std.debug.assert(bytes.len == numel * elem);
         if (elem == 2) {
             const buf = try self.allocator.alloc(f32, numel);
+            std.debug.assert(buf.len == numel);
             errdefer self.allocator.free(buf);
             const is_bf16 = dtype[0] == 'B';
             for (buf, 0..) |*o, i| {

@@ -25,6 +25,7 @@ pub fn forecast(allocator: Allocator, io: Io, model: *const Model, inputs: []con
     const P: usize = c.chronos_config.prediction_length;
     const max_ctx: usize = c.chronos_config.context_length;
     if (b == 0 or t_in == 0 or horizon == 0) return error.EmptyInput;
+    std.debug.assert(inputs.len >= b * t_in);
 
     const out = try allocator.alloc(f32, b * horizon * q);
     errdefer allocator.free(out);

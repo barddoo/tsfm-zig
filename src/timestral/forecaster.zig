@@ -74,6 +74,12 @@ pub fn forecast(
     o.per_shot_horizon_patches = @min(o.per_shot_horizon_patches, cfgm.block_size);
 
     const any_cov = cov.past != null or cov.known != null or cov.cat_past != null or cov.cat_known != null;
+    std.debug.assert(inputs.len >= b * v * t and observed.len >= b * v * t);
+    std.debug.assert(horizon > 0);
+    if (cov.past) |p| std.debug.assert(p.len >= b * cov.n_past * t);
+    if (cov.known) |k| std.debug.assert(k.len >= b * cov.n_known * (t + horizon));
+    if (cov.cat_past) |p| std.debug.assert(p.len >= b * cov.n_cat_past * t);
+    if (cov.cat_known) |k| std.debug.assert(k.len >= b * cov.n_cat_known * (t + horizon));
     if (any_cov and !cfgm.covariate_enabled) return error.CovariatesUnsupported;
     if ((cov.known != null or cov.cat_known != null) and !cfgm.supportsKnownCovariates()) return error.KnownCovariatesUnsupported;
 
@@ -441,6 +447,10 @@ fn blockDecode(
         if (r == .target) v += 1;
     }
     const nt = groups * v;
+    std.debug.assert(vall > 0 and v <= vall);
+    std.debug.assert(t_in % ps == 0);
+    std.debug.assert(rows.len >= nrows * t_in and mask.len >= nrows * t_in);
+    std.debug.assert(hpad >= horizon);
 
     var t = t_in;
     var ctx = try allocator.dupe(f32, rows);
@@ -458,9 +468,12 @@ fn blockDecode(
         // model's per-forward scratch) is released by one reset at the end of the iteration.
         defer _ = arena_state.reset(.retain_capacity);
         const arena = arena_state.allocator();
+        std.debug.assert(t % ps == 0);
+        std.debug.assert(ctx.len >= nrows * t and cmask.len >= nrows * t);
 
         const block = @min(o.per_shot_horizon_patches, remaining);
         const blen = block * ps;
+        std.debug.assert(block > 0 and blen > 0);
         const qs = try arena.alloc(f32, nt * blen * q);
 
         var kfb: ?[]f32 = null;
@@ -500,8 +513,10 @@ fn blockDecode(
         // covariates a blank. Past max_context the oldest steps are dropped.
         const nt_len = t + blen;
         const keep_t = if (nt_len > o.max_context) @max(ps, o.max_context / ps * ps) else nt_len;
+        std.debug.assert(keep_t > 0 and keep_t <= nt_len);
         const nctx = try allocator.alloc(f32, nrows * keep_t);
         const nmask = try allocator.alloc(bool, nrows * keep_t);
+        std.debug.assert(nctx.len == nrows * keep_t and nmask.len == nrows * keep_t);
         for (0..groups) |g| {
             var ti: usize = 0;
             for (0..vall) |i| {
@@ -544,6 +559,7 @@ fn blockDecode(
         cmask = nmask;
         t = keep_t;
     }
+    std.debug.assert(done >= horizon and done - horizon < ps);
 }
 
 const Welford = struct { w: f64, mean: f64, m2: f64 };
