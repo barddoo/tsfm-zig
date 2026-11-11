@@ -92,7 +92,7 @@ fn gemmNTFallback(cc: []f32, ldc: usize, a: []const f32, lda: usize, b: []const 
                 var bv: [4]Vec = undefined;
                 inline for (0..4) |w| bv[w] = b[(j + w) * ldb + p ..][0..lanes].*;
                 inline for (0..row_tile) |u| {
-                    inline for (0..4) |w| acc[u][w] += av[u] * bv[w];
+                    inline for (0..4) |w| acc[u][w] = @mulAdd(Vec, av[u], bv[w], acc[u][w]);
                 }
             }
             inline for (0..row_tile) |u| {
@@ -113,7 +113,7 @@ fn gemmNTFallback(cc: []f32, ldc: usize, a: []const f32, lda: usize, b: []const 
                 const bv: Vec = b[j * ldb + p ..][0..lanes].*;
                 inline for (0..row_tile) |u| {
                     const av: Vec = a[(i + u) * lda + p ..][0..lanes].*;
-                    acc[u] += av * bv;
+                    acc[u] = @mulAdd(Vec, av, bv, acc[u]);
                 }
             }
             inline for (0..row_tile) |u| {
@@ -135,7 +135,7 @@ fn gemmNTFallback(cc: []f32, ldc: usize, a: []const f32, lda: usize, b: []const 
                 const av: Vec = ar[p..][0..lanes].*;
                 inline for (0..4) |u| {
                     const bv: Vec = b[(j + u) * ldb + p ..][0..lanes].*;
-                    acc[u] += av * bv;
+                    acc[u] = @mulAdd(Vec, av, bv, acc[u]);
                 }
             }
             inline for (0..4) |u| {
@@ -151,7 +151,7 @@ fn gemmNTFallback(cc: []f32, ldc: usize, a: []const f32, lda: usize, b: []const 
             while (p < kv) : (p += lanes) {
                 const av: Vec = ar[p..][0..lanes].*;
                 const bv: Vec = b[j * ldb + p ..][0..lanes].*;
-                acc += av * bv;
+                acc = @mulAdd(Vec, av, bv, acc);
             }
             var sum = @reduce(.Add, acc);
             var q = kv;

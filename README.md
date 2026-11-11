@@ -57,7 +57,8 @@ file.
 | `--known FILE`      | Timestral: known-future covariates                                   |
 | `--cat-past FILE`   | Timestral: categorical past codes                                    |
 | `--cat-known FILE`  | Timestral: categorical future codes                                  |
-| `--prefetch`        | `madvise(MADV_WILLNEED)` the checkpoint after mapping                |
+| `--prefetch`        | `madvise(MADV_WILLNEED)` the checkpoint after mapping (default with `--threads 1`) |
+| `--no-prefetch`     | never prefetch (default with more than one thread)                   |
 | `--revision REV`    | Hub branch, tag or commit (default `main`)                           |
 | `--offline`         | never touch the network (also `HF_HUB_OFFLINE=1`)                    |
 | `--threads N`       | worker threads (default: one per logical CPU; `1` = single-threaded) |
@@ -110,7 +111,7 @@ covariates and autoregressive long-horizon unrolling are not ported.
 A repo id is looked up in the Hugging Face cache and downloaded there if
 missing. F32, F16 and BF16 Timestral checkpoints load; the published Chronos-2
 checkpoint is F32. Weights are a read-only mmap used in place. `--prefetch`
-turns cold page faults into a read-ahead at load; it changes only when pages are
+(the default with `--threads 1`) turns cold page faults into a read-ahead at load; it changes only when pages are
 read, never the values.
 
 ## Build options
@@ -305,7 +306,7 @@ OpenBLAS installed).
 Metal is roughly CPU parity on an M4 after the weight cache: MPS's per-call
 overhead is much higher than cuBLAS's. CUDA is the backend with a clear win.
 
-`--prefetch` helps only cold files: with `--threads 1`, first-forecast time
+`--prefetch` is on by default with `--threads 1` and off otherwise (`--no-prefetch` overrides): with `--threads 1`, first-forecast time
 dropped about 1.9× (Chronos-2 676→358 ms, Bolt-small 262→141 ms); with the
 default pool it is a wash (Chronos-2 ~9% slower). Linux not measured.
 

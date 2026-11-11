@@ -45,3 +45,15 @@ pub const Mapped = struct {
         self.file.close(io);
     }
 };
+
+/// Default worker-thread count. On Apple Silicon the Accelerate GEMMs already run on the
+/// matrix units, so threads beyond the performance cores add CPU time without lowering latency
+/// (measured on Chronos-2, Chronos-Bolt and Timestral); elsewhere it is one per logical CPU.
+pub fn defaultThreads() usize {
+    const all = std.Thread.getCpuCount() catch 1;
+    if (builtin.os.tag != .macos) return all;
+    var n: i32 = 0;
+    var len: usize = @sizeOf(i32);
+    if (std.c.sysctlbyname("hw.perflevel0.logicalcpu", &n, &len, null, 0) != 0 or n <= 0) return all;
+    return @min(all, @as(usize, @intCast(n)));
+}

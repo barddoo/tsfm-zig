@@ -36,10 +36,11 @@ const usage =
     \\  --no-symmetric      skip averaging with the reflected forecast of -context
     \\  --no-clip           do not clamp non-negative series at 0
     \\  --prefetch          ask the kernel to read the checkpoint in at load (madvise WILLNEED);
-    \\                      speeds up the first forecast on an uncached file with --threads 1
+    \\                      on by default with --threads 1, where it speeds up the first forecast
+    \\  --no-prefetch       never prefetch (the default with more than one thread)
     \\  --revision REV      Hub branch, tag or commit (default main)
     \\  --offline           never touch the network (also HF_HUB_OFFLINE=1)
-    \\  --threads N         worker threads (default: one per logical CPU; 1 = single-threaded)
+    \\  --threads N         worker threads (default: one per logical CPU, or per performance core on Apple Silicon)
     \\  --time              print model load and forecast wall time to stderr
     \\
     \\prints CSV: series,variate,step,q<level>... (step 1 is the first forecast step)
@@ -56,7 +57,7 @@ const Args = struct {
     threads: usize = 0, // 0 = one per logical CPU
     covariates: family.CovariatePaths = .{},
     opts: family.Options = .{},
-    prefetch: core.safetensors.Prefetch = .off,
+    prefetch: ?core.safetensors.Prefetch = null, // null: decided by the thread count
 };
 
 fn parseArgs(argv: []const [:0]const u8, env: *const std.process.Environ.Map) !Args {
@@ -94,6 +95,8 @@ fn parseArgs(argv: []const [:0]const u8, env: *const std.process.Environ.Map) !A
             args.opts.no_clip = true;
         } else if (mem.eql(u8, a, "--prefetch")) {
             args.prefetch = .will_need;
+        } else if (mem.eql(u8, a, "--no-prefetch")) {
+            args.prefetch = .off;
         } else if (mem.eql(u8, a, "--offline")) {
             args.offline = true;
         } else if (mem.eql(u8, a, "--time")) {
@@ -130,7 +133,7 @@ fn run(init: std.process.Init) !void {
 
     // Worker pool for `par.forRange` (this thread plus `threads - 1` workers); also the `Io`
     // behind file access and downloads.
-    par.threads = if (args.threads == 0) (std.Thread.getCpuCount() catch 1) else args.threads;
+    par.threads = if (args.threads == 0) core.sys.defaultThreads() else args.threads;
     var threaded: Io.Threaded = .init(allocator, .{ .async_limit = .limited(par.threads - 1) });
     defer threaded.deinit();
     const io = threaded.io();
@@ -158,7 +161,7 @@ fn run(init: std.process.Init) !void {
         .covariates = args.covariates,
         .horizon = args.horizon,
         .options = args.opts,
-        .prefetch = args.prefetch,
+        .prefetch = args.prefetch orelse if (par.threads == 1) .will_need else .off,
     };
     const result = families.Registry.run(&req) catch |err| {
         if (err == error.UnsupportedArchitecture) {
