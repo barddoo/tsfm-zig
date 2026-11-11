@@ -13,43 +13,7 @@ const st = core.safetensors;
 
 const Allocator = std.mem.Allocator;
 
-const Linear = struct {
-    w: []const f32,
-    b: ?[]const f32 = null,
-};
-
-const ResBlock = struct {
-    hidden: Linear,
-    output: Linear,
-    residual: Linear,
-    in: usize,
-    hid: usize,
-    out: usize,
-
-    fn load(io: std.Io, w: *st.Weights, buf: []u8, prefix: []const u8, in: usize, hid: usize, out: usize) !ResBlock {
-        return .{
-            .hidden = try loadLinear(io, w, buf, prefix, "hidden_layer", hid, in),
-            .output = try loadLinear(io, w, buf, prefix, "output_layer", out, hid),
-            .residual = try loadLinear(io, w, buf, prefix, "residual_layer", out, in),
-            .in = in,
-            .hid = hid,
-            .out = out,
-        };
-    }
-
-    /// `output(relu(hidden(x))) + residual(x)` for `rows` input vectors.
-    fn forward(self: ResBlock, io: std.Io, allocator: Allocator, y: []f32, x: []const f32, rows: usize) !void {
-        const h = try allocator.alloc(f32, rows * self.hid);
-        defer allocator.free(h);
-        nn.linear(io, h, x, rows, self.hidden.w, self.hid, self.in, self.hidden.b);
-        nn.relu(h);
-        nn.linear(io, y, h, rows, self.output.w, self.out, self.hid, self.output.b);
-        const r = try allocator.alloc(f32, rows * self.out);
-        defer allocator.free(r);
-        nn.linear(io, r, x, rows, self.residual.w, self.out, self.in, self.residual.b);
-        nn.addInPlace(y[0 .. rows * self.out], r);
-    }
-};
+const ResBlock = core.resblock.ResBlock;
 
 const Attn = struct {
     norm: []const f32,
@@ -69,14 +33,6 @@ const Layer = struct {
 
 fn tensorName(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
     return std.fmt.bufPrint(buf, fmt, args) catch unreachable;
-}
-
-fn loadLinear(io: std.Io, w: *st.Weights, buf: []u8, prefix: []const u8, name: []const u8, out: usize, in: usize) !Linear {
-    const wn = tensorName(buf, "{s}.{s}.weight", .{ prefix, name });
-    const weight = try w.get(io, wn, out * in);
-    const bn = tensorName(buf, "{s}.{s}.bias", .{ prefix, name });
-    const bias = try w.get(io, bn, out);
-    return .{ .w = weight, .b = bias };
 }
 
 fn loadAttn(io: std.Io, w: *st.Weights, buf: []u8, layer: usize, which: usize, d: usize) !Attn {
@@ -307,7 +263,6 @@ const TimeJob = struct {
         const seq = self.seq;
         const d = self.d;
         const hd = self.hd;
-        const mask_min: f32 = -std.math.floatMax(f32);
         const scores = std.heap.smp_allocator.alloc(f32, seq * seq) catch @panic("out of memory");
         defer std.heap.smp_allocator.free(scores);
 
@@ -318,19 +273,8 @@ const TimeJob = struct {
             const base = r * seq * d;
             const kv = self.key_valid[r * seq ..][0..seq];
 
-            nn.gemmNT(scores, seq, self.q[base + off ..], d, self.k[base + off ..], d, seq, seq, hd, 1.0);
-            if (self.keys_all_valid) {
-                for (0..seq) |i| nn.softmax(scores[i * seq ..][0..seq]);
-            } else {
-                for (0..seq) |i| {
-                    const row = scores[i * seq ..][0..seq];
-                    for (0..seq) |j| if (!kv[j]) {
-                        row[j] += mask_min;
-                    };
-                    nn.softmax(row);
-                }
-            }
-            nn.gemmNN(self.o[base + off ..], d, scores, seq, self.v[base + off ..], d, seq, hd, seq);
+            const mask = core.attn.Mask.pick(false, self.keys_all_valid, true);
+            core.attn.selfAttendRuntime(mask, scores, self.q[base + off ..], self.k[base + off ..], self.v[base + off ..], self.o[base + off ..], .{ .q = d, .k = d, .v = d, .o = d }, seq, hd, 1.0, kv, null);
         }
     }
 };

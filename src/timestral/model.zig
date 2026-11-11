@@ -623,28 +623,8 @@ const TimeJob = struct {
             const kv = geo.key_valid[r * ne ..][0..ne];
 
             // Encoder queries over encoder keys.
-            nn.gemmNT(scores, ne, q, 3 * d, k, 3 * d, ne, ne, hd, sm_scale);
-            if (geo.keys_all_valid) {
-                if (bidir) {
-                    for (0..ne) |i| nn.softmax(scores[i * ne ..][0..ne]);
-                } else {
-                    // Causal: only a prefix of the row is scored; the tail stays zero.
-                    for (0..ne) |i| {
-                        nn.softmax(scores[i * ne ..][0 .. i + 1]);
-                        @memset(scores[i * ne + i + 1 ..][0 .. ne - i - 1], 0);
-                    }
-                }
-            } else {
-                for (0..ne) |i| {
-                    const row = scores[i * ne ..][0..ne];
-                    for (0..ne) |j| {
-                        const allowed = j == i or (kv[j] and (bidir or j <= i));
-                        if (!allowed) row[j] = ninf;
-                    }
-                    nn.softmax(row);
-                }
-            }
-            nn.gemmNN(o, d, scores, ne, v, 3 * d, ne, hd, ne);
+            const mask = core.attn.Mask.pick(!bidir, geo.keys_all_valid, false);
+            core.attn.selfAttendRuntime(mask, scores, q, k, v, o, .{ .q = 3 * d, .k = 3 * d, .v = 3 * d, .o = d }, ne, hd, sm_scale, kv, null);
             // Decoder queries: valid context keys, then the causal decoder chain.
             nn.gemmNT(scores, sl, self.qkv[base + ne * 3 * d + off ..], 3 * d, k, 3 * d, h, sl, hd, sm_scale);
             if (geo.keys_all_valid) {

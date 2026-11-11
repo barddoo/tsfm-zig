@@ -1,7 +1,7 @@
 # tsfm-zig (Zig runner)
 
-Standalone CPU inference for [Timestral](https://github.com/mistralai/timestral) and
-[Chronos-2](https://github.com/amazon-science/chronos-forecasting) checkpoints, in Zig 0.17.
+Standalone CPU inference for [Timestral](https://github.com/mistralai/timestral),
+[Chronos-2](https://github.com/amazon-science/chronos-forecasting) and Chronos-Bolt checkpoints, in Zig 0.17.
 Everything except the matrix products is Zig standard library: files and memory-mapped weights
 (`std.Io`), the Hub download (`std.http.Client`, `std.json`), threads (`std.Io.Threaded`) and SIMD
 (`@Vector`). Matrix products can run on a C BLAS (Apple Accelerate by default on macOS, OpenBLAS
@@ -19,24 +19,53 @@ identical for any thread count.
 zig build --release=fast
 ./zig-out/bin/timestral mistralai/Timestral-28M series.csv --horizon 96 > forecast.csv
 ./zig-out/bin/timestral amazon/chronos-2 series.csv --horizon 96 > forecast.csv
+./zig-out/bin/timestral amazon/chronos-bolt-small series.csv --horizon 96 > forecast.csv
 ```
 
 `<model>` is a directory holding `config.json` and `model.safetensors`, or a Hub repo id. The model
-family is read from `config.json`: `architectures: ["Chronos2Model"]` runs Chronos-2, anything else
-runs Timestral. A repo id is looked up in the Hugging Face cache (`HF_HUB_CACHE`, `HF_HOME`,
+family is read from `config.json`: `architectures: ["Chronos2Model"]` runs Chronos-2, `["ChronosBoltModelForForecasting"]` runs Chronos-Bolt and a Timestral
+config (recognized by `block_schedule`, `quantile_knots` and `patch_size`) runs Timestral; a config no
+registered family claims is an error. A repo id is looked up in the Hugging Face cache (`HF_HUB_CACHE`, `HF_HOME`,
 `~/.cache/huggingface/hub`) and downloaded there if missing (`HF_TOKEN` is used for gated repos;
 `--offline` or `HF_HUB_OFFLINE=1` forbids the network). F32, F16 and BF16 Timestral checkpoints
 load; the published Chronos-2 checkpoint is F32.
 
+Weights are a read-only mmap used in place, so a file that is not in the page cache is read by page
+faults during the first forecast. `--prefetch` (library: `Weights.prefetch(.will_need)`) asks the
+kernel to read it in at load instead (`madvise(MADV_WILLNEED)`). Measured on macOS with a cold file,
+the first forecast with `--threads 1` is about 1.9x faster end to end (Chronos-2 676 to 358 ms,
+Bolt-small 262 to 141 ms); with the default worker pool the unhinted parallel faults are already
+efficient, so the gain is small and Chronos-2 got about 9% slower. It never changes the output and
+costs nothing on a cached file. Linux has not been measured.
+
+## Adding a model family
+
+Families are registered at compile time in `src/families.zig`. A family is a module with three
+declarations, checked against `core.family` by the compiler:
+
+```zig
+pub const name = "My-Model";
+pub fn matches(allocator: std.mem.Allocator, config_text: []const u8) !bool { ... }
+pub fn run(req: *const core.family.Request) !core.family.Forecast { ... }
+```
+
+`run` loads the weights, reads the series with `core.series`, forecasts, and returns the quantile
+levels and a `(series, variates, horizon, levels)` array; the CLI does argument parsing and CSV
+output. Then add the module to the tuple in `src/families.zig`. Shared attention goes through
+`core.attn`, whose `Mask` (`full`, `keys_additive`, `causal`, `causal_keys`, `full_keys`) is a comptime
+parameter, so each variant compiles to its own mask-free loop. Run its tests with
+`zig test --dep c -Mroot=src/core/attn.zig -Mc=src/core/c_none.zig`.
+
 ## Model support
 
-| | Timestral | Chronos-2 |
-|---|---|---|
-| targets | univariate and multivariate | univariate (each row is independent) |
-| covariates | numeric and categorical, past and known-future | none in v1 |
-| quantiles | 9 (config-defined) | 21 (config-defined) |
-| context | config-defined, `--max-context` override | 8192, truncated from the left |
-| horizon | block-autoregressive, unbounded | up to 1024 steps in one pass |
+| | Timestral | Chronos-2 | Chronos-Bolt |
+|---|---|---|---|
+| architecture | decoder-only, patched | encoder-only, patched | T5 encoder + one-token decoder, patched |
+| targets | univariate and multivariate | univariate (each row is independent) | univariate (each row is independent) |
+| covariates | numeric and categorical, past and known-future | none in v1 | none |
+| quantiles | 9 (config-defined) | 21 (config-defined) | 9 (config-defined) |
+| context | config-defined, `--max-context` override | 8192, truncated from the left | 2048, truncated from the left |
+| horizon | block-autoregressive, unbounded | up to 1024 steps in one pass | 64 steps per pass; longer horizons feed each quantile back and re-reduce, as the reference does |
 
 Chronos-2 v1 is the univariate/singleton-group path: cross-series (group) attention, known-future
 covariates and the autoregressive long-horizon unrolling are out of scope. `--past`, `--known`,

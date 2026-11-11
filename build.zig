@@ -51,6 +51,14 @@ pub fn build(b: *std.Build) void {
         .imports = &.{.{ .name = "core", .module = core_mod }},
     });
 
+    const bolt_mod = b.addModule("chronos_bolt", .{
+        .root_source_file = b.path("src/chronos_bolt/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = blas != .builtin,
+        .imports = &.{.{ .name = "core", .module = core_mod }},
+    });
+
     const exe = b.addExecutable(.{
         .name = "timestral",
         .root_module = b.createModule(.{
@@ -61,6 +69,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "core", .module = core_mod },
                 .{ .name = "chronos2", .module = chronos2_mod },
+                .{ .name = "chronos_bolt", .module = bolt_mod },
             },
         }),
     });
@@ -85,6 +94,7 @@ pub fn build(b: *std.Build) void {
         .imports = &.{
             .{ .name = "core", .module = core_mod },
             .{ .name = "chronos2", .module = chronos2_mod },
+            .{ .name = "chronos_bolt", .module = bolt_mod },
         },
     });
     switch (blas) {

@@ -1,6 +1,7 @@
 //! File and process helpers over `std.Io`.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn eprint(io: std.Io, msg: []const u8) void {
     std.Io.File.stderr().writeStreamingAll(io, msg) catch {};
@@ -26,6 +27,13 @@ pub fn exists(io: std.Io, path: []const u8) bool {
     return true;
 }
 
+/// How the kernel should expect a mapping to be read (`madvise`). Only a hint.
+pub const Advice = enum {
+    /// Start reading the whole range in now (`MADV_WILLNEED`). On macOS the call returns once the
+    /// pages are resident, so it blocks for roughly the time of a sequential read of the file.
+    will_need,
+};
+
 /// A read-only memory mapping of a whole file.
 pub const Mapped = struct {
     file: std.Io.File,
@@ -42,6 +50,16 @@ pub const Mapped = struct {
             .populate = false,
         });
         return .{ .file = file, .map = map, .bytes = map.memory[0..len] };
+    }
+
+    /// Pass `advice` for the whole mapping to the kernel. Best effort: a hint the system declines or
+    /// does not implement is not an error, and the data is read the same either way.
+    pub fn advise(self: *const Mapped, advice: Advice) void {
+        if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
+        const flag: u32 = switch (advice) {
+            .will_need => std.posix.MADV.WILLNEED,
+        };
+        std.posix.madvise(self.map.memory.ptr, self.map.memory.len, flag) catch {};
     }
 
     pub fn close(self: *Mapped, io: std.Io) void {

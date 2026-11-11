@@ -106,3 +106,13 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) !Parsed {
     try parsed.value.validate();
     return parsed;
 }
+
+/// Whether `config.json` describes a Timestral checkpoint. Timestral configs carry no
+/// `architectures` entry, so it is recognized by its own required keys.
+pub fn isTimestral(allocator: std.mem.Allocator, text: []const u8) !bool {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return false;
+    const o = parsed.value.object;
+    return o.contains("block_schedule") and o.contains("quantile_knots") and o.contains("patch_size");
+}

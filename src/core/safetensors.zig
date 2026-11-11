@@ -4,6 +4,22 @@
 const std = @import("std");
 const sys = @import("sys.zig");
 
+/// Whether and how to ask the kernel to read the checkpoint ahead of the forward pass.
+///
+/// The weights are an mmap, so by default a cold file is read by page faults as the first forecast
+/// touches each tensor. Hinting the whole mapping lets the kernel read it in large sequential
+/// requests instead. It changes only when pages are read, never the values.
+///
+/// Measured on macOS/APFS with a cold file: with one thread the first forecast is about 1.9x faster
+/// end to end (the read moves into this call); with a worker pool the unhinted parallel faults are
+/// already efficient, so the gain is small and can turn into a small loss. It is therefore opt-in.
+/// `MADV_SEQUENTIAL` was measured too and was slower in every case, so it is not offered.
+pub const Prefetch = enum {
+    off,
+    /// `MADV_WILLNEED` on the whole mapping.
+    will_need,
+};
+
 pub const Weights = struct {
     allocator: std.mem.Allocator,
     converted: std.ArrayList([]f32) = .empty,
@@ -19,6 +35,14 @@ pub const Weights = struct {
         if (8 + hlen > map.bytes.len) return error.InvalidSafetensors;
         const header = try std.json.parseFromSlice(std.json.Value, allocator, map.bytes[8 .. 8 + hlen], .{});
         return .{ .allocator = allocator, .map = map, .header = header, .data_start = 8 + hlen };
+    }
+
+    /// Apply `mode` to the mapped checkpoint. Call once after `open`; safe to skip.
+    pub fn prefetch(self: *const Weights, mode: Prefetch) void {
+        switch (mode) {
+            .off => {},
+            .will_need => self.map.advise(.will_need),
+        }
     }
 
     pub fn close(self: *Weights, io: std.Io) void {

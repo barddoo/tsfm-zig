@@ -11,3 +11,4 @@ pub const par = core.par;
 pub const sys = core.sys;
 
 pub const chronos2 = @import("chronos2");
+pub const families = @import("families.zig");

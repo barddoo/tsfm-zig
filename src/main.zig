@@ -1,40 +1,41 @@
-//! timestral: zero-shot probabilistic time series forecasting from a Timestral or Chronos-2
-//! checkpoint (the family is selected from `config.json`).
+//! timestral: zero-shot probabilistic time series forecasting from a checkpoint of any registered
+//! model family (see `families.zig`); the family is selected from `config.json`.
 
 const std = @import("std");
 const core = @import("core");
 const sys = core.sys;
-const cfg = @import("timestral/config.zig");
-const st = core.safetensors;
-const model_mod = @import("timestral/model.zig");
-const forecaster = @import("timestral/forecaster.zig");
-const chronos2 = @import("chronos2");
 const hub = core.hub;
 const par = core.par;
+const family = core.family;
+const families = @import("families.zig");
 
 const usage =
     \\usage: timestral <model> <series.csv> --horizon N [options]
     \\
     \\  <model>       a directory with config.json and model.safetensors, or a Hugging Face
-    \\                Hub repo id such as mistralai/Timestral-28M or amazon/chronos-2
-    \\                (cached, else downloaded). Chronos-2 is selected by its config.json.
+    \\                Hub repo id such as mistralai/Timestral-28M, amazon/chronos-2 or
+    \\                amazon/chronos-bolt-small (cached, else downloaded). The model family is
+    \\                selected by its config.json.
     \\  <series.csv>  one line per variate; values separated by commas or whitespace; nan / NA /
     \\                an empty field marks a missing value. Separate several series with a
     \\                blank line (all with the same number of variates and steps).
     \\
     \\Timestral covariates (same blank-line-separated blocks, one block per series, one line
-    \\per covariate; not available for Chronos-2):
+    \\per covariate; Timestral only):
     \\  --past FILE         past-only covariates, as many steps as the series
     \\  --known FILE        known-future covariates, steps + horizon values per line
     \\  --cat-past FILE     categorical codes, as many steps as the series
     \\  --cat-known FILE    categorical codes, steps + horizon values per line
     \\
-    \\options (Chronos-2 horizons are limited to 1024 steps and its series are univariate):
+    \\options (Chronos-2 horizons are limited to 1024 steps; Chronos-2 and Chronos-Bolt series are
+    \\univariate and take no covariates or Timestral-only flags):
     \\  --horizon N         steps to forecast (required)
     \\  --max-context N     keep only the most recent N steps (default: trained length)
     \\  --block-patches N   patches decoded per block (default 32)
     \\  --no-symmetric      skip averaging with the reflected forecast of -context
     \\  --no-clip           do not clamp non-negative series at 0
+    \\  --prefetch          ask the kernel to read the checkpoint in at load (madvise WILLNEED);
+    \\                      speeds up the first forecast on an uncached file with --threads 1
     \\  --revision REV      Hub branch, tag or commit (default main)
     \\  --offline           never touch the network (also HF_HUB_OFFLINE=1)
     \\  --threads N         worker threads (default: one per logical CPU; 1 = single-threaded)
@@ -47,16 +48,14 @@ const usage =
 const Args = struct {
     model: []const u8,
     series: []const u8,
-    past: ?[]const u8 = null,
-    known: ?[]const u8 = null,
-    cat_past: ?[]const u8 = null,
-    cat_known: ?[]const u8 = null,
     horizon: usize = 0,
     revision: []const u8 = "main",
     offline: bool = false,
     time: bool = false,
     threads: usize = 0, // 0 = one per logical CPU
-    opts: forecaster.Options = .{},
+    covariates: family.CovariatePaths = .{},
+    opts: family.Options = .{},
+    prefetch: core.safetensors.Prefetch = .off,
 };
 
 fn parseArgs(argv: []const [:0]const u8, env: *const std.process.Environ.Map) !Args {
@@ -78,20 +77,22 @@ fn parseArgs(argv: []const [:0]const u8, env: *const std.process.Environ.Map) !A
                 if (std.mem.eql(u8, a, "--horizon")) args.horizon = val;
                 if (std.mem.eql(u8, a, "--threads")) args.threads = val;
                 if (std.mem.eql(u8, a, "--max-context")) args.opts.max_context = val;
-                if (std.mem.eql(u8, a, "--block-patches")) args.opts.per_shot_horizon_patches = @max(val, 1);
+                if (std.mem.eql(u8, a, "--block-patches")) args.opts.block_patches = val;
             } else if (std.mem.eql(u8, a, "--past")) {
-                args.past = sval;
+                args.covariates.past = sval;
             } else if (std.mem.eql(u8, a, "--known")) {
-                args.known = sval;
+                args.covariates.known = sval;
             } else if (std.mem.eql(u8, a, "--cat-past")) {
-                args.cat_past = sval;
+                args.covariates.cat_past = sval;
             } else if (std.mem.eql(u8, a, "--cat-known")) {
-                args.cat_known = sval;
+                args.covariates.cat_known = sval;
             } else args.revision = sval;
         } else if (std.mem.eql(u8, a, "--no-symmetric")) {
-            args.opts.symmetric_averaging = false;
+            args.opts.no_symmetric = true;
         } else if (std.mem.eql(u8, a, "--no-clip")) {
-            args.opts.clip_nonnegative = false;
+            args.opts.no_clip = true;
+        } else if (std.mem.eql(u8, a, "--prefetch")) {
+            args.prefetch = .will_need;
         } else if (std.mem.eql(u8, a, "--offline")) {
             args.offline = true;
         } else if (std.mem.eql(u8, a, "--time")) {
@@ -111,90 +112,6 @@ fn parseArgs(argv: []const [:0]const u8, env: *const std.process.Environ.Map) !A
         if (std.mem.eql(u8, v, "1")) args.offline = true;
     }
     return args;
-}
-
-/// A file of blank-line-separated blocks of equal-length rows, as `(blocks, rows, len)` float64.
-const Blocks = struct {
-    data: []f64,
-    blocks: usize,
-    rows: usize,
-    len: usize,
-};
-
-fn parseValue(tok: []const u8) f64 {
-    const s = std.mem.trim(u8, tok, " \t\r");
-    if (s.len == 0) return std.math.nan(f64);
-    return std.fmt.parseFloat(f64, s) catch std.math.nan(f64);
-}
-
-fn parseBlocks(allocator: std.mem.Allocator, text: []const u8) !Blocks {
-    var vals: std.ArrayList(f64) = .empty;
-    errdefer vals.deinit(allocator);
-    var blocks: usize = 0;
-    var rows_in_block: usize = 0;
-    var rows: usize = 0;
-    var len: usize = 0;
-    var have_len = false;
-
-    var it = std.mem.splitScalar(u8, text, '\n');
-    while (it.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len > 0 and line[0] == '#') continue;
-        if (line.len == 0) {
-            // A blank line closes the current block.
-            if (rows_in_block > 0) {
-                if (blocks == 0) rows = rows_in_block else if (rows_in_block != rows) return error.RaggedBlocks;
-                blocks += 1;
-                rows_in_block = 0;
-            }
-            continue;
-        }
-        const before = vals.items.len;
-        if (std.mem.indexOfScalar(u8, line, ',') != null) {
-            var f = std.mem.splitScalar(u8, line, ',');
-            while (f.next()) |tok| try vals.append(allocator, parseValue(tok));
-        } else {
-            var f = std.mem.tokenizeAny(u8, line, " \t");
-            while (f.next()) |tok| try vals.append(allocator, parseValue(tok));
-        }
-        const n = vals.items.len - before;
-        if (!have_len) {
-            len = n;
-            have_len = true;
-        } else if (n != len) {
-            return error.RaggedInput;
-        }
-        rows_in_block += 1;
-    }
-    if (rows_in_block > 0) {
-        if (blocks == 0) rows = rows_in_block else if (rows_in_block != rows) return error.RaggedBlocks;
-        blocks += 1;
-    }
-    if (blocks == 0 or len == 0) return error.EmptyInput;
-    return .{ .data = try vals.toOwnedSlice(allocator), .blocks = blocks, .rows = rows, .len = len };
-}
-
-fn loadBlocks(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Blocks {
-    const text = try sys.readFile(io, allocator, path);
-    defer allocator.free(text);
-    return parseBlocks(allocator, text);
-}
-
-fn toF32(allocator: std.mem.Allocator, x: []const f64) ![]f32 {
-    const out = try allocator.alloc(f32, x.len);
-    for (out, x) |*o, v| o.* = @floatCast(v);
-    return out;
-}
-
-/// A covariate file, checked against the series: one block per series, rows of `len` values.
-fn covariateFile(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8, batch: usize, len: usize, what: []const u8) !?Blocks {
-    const p = path orelse return null;
-    const blk = try loadBlocks(io, allocator, p);
-    if (blk.blocks != batch or blk.len != len) {
-        sys.eprintf(io, "{s}: expected {d} series with {d} values per line, got {d} series with {d}\n", .{ what, batch, len, blk.blocks, blk.len });
-        return error.CovariateShape;
-    }
-    return blk;
 }
 
 fn run(init: std.process.Init) !void {
@@ -229,144 +146,43 @@ fn run(init: std.process.Init) !void {
     defer allocator.free(cfg_path);
     const cfg_text = try sys.readFile(io, allocator, cfg_path);
     defer allocator.free(cfg_text);
-    if (try chronos2.config.isChronos2(allocator, cfg_text)) {
-        try runChronos2(io, par_io, allocator, args, model_dir, cfg_text, t_start);
-        return;
-    }
-    const parsed = try cfg.parse(allocator, cfg_text);
-    defer parsed.deinit();
 
-    const w_path = try std.fmt.allocPrint(allocator, "{s}/model.safetensors", .{model_dir});
-    defer allocator.free(w_path);
-    var weights = try st.Weights.open(io, allocator, w_path);
-    defer weights.close(io);
-    var model = try model_mod.Model.load(io, allocator, parsed.value, &weights);
-    defer model.deinit(allocator);
-    const t_loaded = sys.now(io);
-
-    const series = try loadBlocks(io, allocator, args.series);
-    defer allocator.free(series.data);
-    const b = series.blocks;
-    const v = series.rows;
-    const t = series.len;
-
-    const values = try toF32(allocator, series.data);
-    defer allocator.free(values);
-    const observed = try allocator.alloc(bool, values.len);
-    defer allocator.free(observed);
-    for (values, observed) |*x, *o| {
-        o.* = std.math.isFinite(x.*);
-        if (!o.*) x.* = 0;
-    }
-
-    var cov: forecaster.Covariates = .{};
-    const past = try covariateFile(io, allocator, args.past, b, t, "--past");
-    const known = try covariateFile(io, allocator, args.known, b, t + args.horizon, "--known");
-    const cat_past = try covariateFile(io, allocator, args.cat_past, b, t, "--cat-past");
-    const cat_known = try covariateFile(io, allocator, args.cat_known, b, t + args.horizon, "--cat-known");
-    defer for ([_]?Blocks{ past, known, cat_past, cat_known }) |blk| if (blk) |x| allocator.free(x.data);
-    const past32 = if (past) |p| try toF32(allocator, p.data) else null;
-    defer if (past32) |x| allocator.free(x);
-    const known32 = if (known) |k| try toF32(allocator, k.data) else null;
-    defer if (known32) |x| allocator.free(x);
-    if (past) |p| {
-        cov.past = past32;
-        cov.n_past = p.rows;
-    }
-    if (known) |k| {
-        cov.known = known32;
-        cov.n_known = k.rows;
-    }
-    if (cat_past) |p| {
-        cov.cat_past = p.data;
-        cov.n_cat_past = p.rows;
-    }
-    if (cat_known) |k| {
-        cov.cat_known = k.data;
-        cov.n_cat_known = k.rows;
-    }
-
-    const result = try forecaster.forecast(allocator, par_io, &model, values, observed, b, v, t, args.horizon, cov, args.opts);
-    defer allocator.free(result);
-    if (args.time) sys.eprintf(io, "load={d:.3}s forecast={d:.3}s\n", .{ t_loaded - t_start, sys.now(io) - t_loaded });
-
-    const q = parsed.value.numQuantiles();
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    try out.appendSlice(allocator, "series,variate,step");
-    for (parsed.value.quantile_knots) |level| try out.print(allocator, ",q{d}", .{level});
-    try out.append(allocator, '\n');
-    for (0..b) |s| {
-        for (0..v) |r| {
-            for (0..args.horizon) |step| {
-                try out.print(allocator, "{d},{d},{d}", .{ s, r, step + 1 });
-                for (result[(((s * v) + r) * args.horizon + step) * q ..][0..q]) |x| try out.print(allocator, ",{d}", .{x});
-                try out.append(allocator, '\n');
-            }
+    const req: family.Request = .{
+        .io = io,
+        .par_io = par_io,
+        .allocator = allocator,
+        .model_dir = model_dir,
+        .config_text = cfg_text,
+        .series_path = args.series,
+        .covariates = args.covariates,
+        .horizon = args.horizon,
+        .options = args.opts,
+        .prefetch = args.prefetch,
+    };
+    const result = families.Registry.run(&req) catch |err| {
+        if (err == error.UnsupportedArchitecture) {
+            sys.eprintf(io, "unsupported model: config.json in '{s}' is not a known family (supported: {s})\n", .{ model_dir, families.Registry.names });
         }
-    }
-    try sys.writeStdout(io, out.items);
+        return err;
+    };
+    defer result.deinit(allocator);
+    if (args.time) sys.eprintf(io, "load={d:.3}s forecast={d:.3}s\n", .{ result.t_loaded - t_start, sys.now(io) - result.t_loaded });
+
+    try writeCsv(io, allocator, result);
 }
 
-fn runChronos2(
-    io: std.Io,
-    par_io: std.Io,
-    allocator: std.mem.Allocator,
-    args: Args,
-    model_dir: []const u8,
-    cfg_text: []const u8,
-    t_start: f64,
-) !void {
-    if (args.past != null or args.known != null or args.cat_past != null or args.cat_known != null) {
-        sys.eprint(io, "Chronos-2 does not support covariates in this runner (v1): --past, --known, --cat-past and --cat-known are unavailable\n");
-        return error.CovariatesUnsupported;
-    }
-    if (!args.opts.symmetric_averaging or !args.opts.clip_nonnegative or args.opts.max_context != 0 or args.opts.per_shot_horizon_patches != 32) {
-        sys.eprint(io, "--max-context, --block-patches, --no-symmetric and --no-clip are Timestral-only options\n");
-        return error.UnsupportedOption;
-    }
-
-    const parsed = try chronos2.config.parse(allocator, cfg_text);
-    defer parsed.deinit();
-    const c = parsed.value;
-    if (args.horizon > c.predictionLength()) {
-        sys.eprintf(io, "Chronos-2 supports horizons up to {d} steps (long-horizon unrolling is not ported)\n", .{c.predictionLength()});
-        return error.HorizonTooLong;
-    }
-
-    const w_path = try std.fmt.allocPrint(allocator, "{s}/model.safetensors", .{model_dir});
-    defer allocator.free(w_path);
-    var weights = try st.Weights.open(io, allocator, w_path);
-    defer weights.close(io);
-    var model = try chronos2.model.Model.load(io, allocator, c, &weights);
-    defer model.deinit(allocator);
-    const t_loaded = sys.now(io);
-
-    const series = try loadBlocks(io, allocator, args.series);
-    defer allocator.free(series.data);
-    const b = series.blocks;
-    const v = series.rows;
-    const t = series.len;
-
-    // Chronos-2 v1 is univariate: every (series, variate) row is its own independent series.
-    const values = try toF32(allocator, series.data);
-    defer allocator.free(values);
-    const n = b * v;
-    const result = try chronos2.forecaster.forecast(allocator, par_io, &model, values, n, t, args.horizon);
-    defer allocator.free(result);
-    if (args.time) sys.eprintf(io, "load={d:.3}s forecast={d:.3}s\n", .{ t_loaded - t_start, sys.now(io) - t_loaded });
-
-    const q = c.numQuantiles();
+fn writeCsv(io: std.Io, allocator: std.mem.Allocator, r: family.Forecast) !void {
+    const q = r.levels.len;
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     try out.appendSlice(allocator, "series,variate,step");
-    for (c.chronos_config.quantiles) |level| try out.print(allocator, ",q{d}", .{level});
+    for (r.levels) |level| try out.print(allocator, ",q{d}", .{level});
     try out.append(allocator, '\n');
-    for (0..b) |s| {
-        for (0..v) |r| {
-            for (0..args.horizon) |step| {
-                try out.print(allocator, "{d},{d},{d}", .{ s, r, step + 1 });
-                for (result[(((s * v) + r) * args.horizon + step) * q ..][0..q]) |x| try out.print(allocator, ",{d}", .{x});
+    for (0..r.series) |s| {
+        for (0..r.variates) |v| {
+            for (0..r.horizon) |step| {
+                try out.print(allocator, "{d},{d},{d}", .{ s, v, step + 1 });
+                for (r.values[(((s * r.variates) + v) * r.horizon + step) * q ..][0..q]) |x| try out.print(allocator, ",{d}", .{x});
                 try out.append(allocator, '\n');
             }
         }
@@ -378,6 +194,7 @@ pub fn main(init: std.process.Init) u8 {
     run(init) catch |err| {
         switch (err) {
             error.MissingArguments, error.MissingValue, error.InvalidNumber, error.UnknownOption, error.TooManyArguments => sys.eprint(init.io, usage),
+            error.UnsupportedArchitecture => {},
             else => sys.eprintf(init.io, "error: {s}\n", .{@errorName(err)}),
         }
         return 1;
