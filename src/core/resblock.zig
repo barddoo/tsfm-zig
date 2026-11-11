@@ -8,35 +8,43 @@ const st = @import("safetensors.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Linear = struct {
-    w: []const f32,
+    w: nn.Weight = .{},
     b: ?[]const f32 = null,
+
+    pub fn deinit(self: *const Linear) void {
+        self.w.deinit();
+    }
 };
 
-fn loadLinear(io: std.Io, w: *st.Weights, buf: []u8, prefix: []const u8, name: []const u8, out: usize, in: usize) !Linear {
+fn loadLinear(io: std.Io, backend: ?nn.Backend, w: *st.Weights, buf: []u8, prefix: []const u8, name: []const u8, out: usize, in: usize) !Linear {
     const wn = std.fmt.bufPrint(buf, "{s}.{s}.weight", .{ prefix, name }) catch unreachable;
     const weight = try w.get(io, wn, out * in);
     const bn = std.fmt.bufPrint(buf, "{s}.{s}.bias", .{ prefix, name }) catch unreachable;
     const bias = try w.get(io, bn, out);
-    return .{ .w = weight, .b = bias };
+    return .{ .w = nn.Weight.initWith(backend, weight), .b = bias };
 }
 
 pub const ResBlock = struct {
-    hidden: Linear,
-    output: Linear,
-    residual: Linear,
-    in: usize,
-    hid: usize,
-    out: usize,
+    hidden: Linear = .{},
+    output: Linear = .{},
+    residual: Linear = .{},
+    in: usize = 0,
+    hid: usize = 0,
+    out: usize = 0,
 
-    pub fn load(io: std.Io, w: *st.Weights, buf: []u8, prefix: []const u8, in: usize, hid: usize, out: usize) !ResBlock {
-        return .{
-            .hidden = try loadLinear(io, w, buf, prefix, "hidden_layer", hid, in),
-            .output = try loadLinear(io, w, buf, prefix, "output_layer", out, hid),
-            .residual = try loadLinear(io, w, buf, prefix, "residual_layer", out, in),
-            .in = in,
-            .hid = hid,
-            .out = out,
-        };
+    pub fn load(io: std.Io, backend: ?nn.Backend, w: *st.Weights, buf: []u8, prefix: []const u8, in: usize, hid: usize, out: usize) !ResBlock {
+        var block: ResBlock = .{ .in = in, .hid = hid, .out = out };
+        errdefer block.deinit();
+        block.hidden = try loadLinear(io, backend, w, buf, prefix, "hidden_layer", hid, in);
+        block.output = try loadLinear(io, backend, w, buf, prefix, "output_layer", out, hid);
+        block.residual = try loadLinear(io, backend, w, buf, prefix, "residual_layer", out, in);
+        return block;
+    }
+
+    pub fn deinit(self: *const ResBlock) void {
+        self.hidden.deinit();
+        self.output.deinit();
+        self.residual.deinit();
     }
 
     /// `output(relu(hidden(x))) + residual(x)` for `rows` input vectors.

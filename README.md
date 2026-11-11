@@ -1,6 +1,6 @@
 # tsfm-zig (Zig runner)
 
-Standalone CPU inference for [Timestral](https://github.com/mistralai/timestral),
+Standalone inference for [Timestral](https://github.com/mistralai/timestral),
 [Chronos-2](https://github.com/amazon-science/chronos-forecasting) and Chronos-Bolt checkpoints, in Zig 0.17.
 Everything except the matrix products is Zig standard library: files and memory-mapped weights
 (`std.Io`), the Hub download (`std.http.Client`, `std.json`), threads (`std.Io.Threaded`) and SIMD
@@ -37,6 +37,57 @@ the first forecast with `--threads 1` is about 1.9x faster end to end (Chronos-2
 Bolt-small 262 to 141 ms); with the default worker pool the unhinted parallel faults are already
 efficient, so the gain is small and Chronos-2 got about 9% slower. It never changes the output and
 costs nothing on a cached file. Linux has not been measured.
+
+## GPU backends (Metal, CUDA)
+
+`-Dgpu=metal` (macOS) and `-Dgpu=cuda` (Linux/NVIDIA) are opt-in; the default is `none`. Backend
+code lives under `src/platform/<backend>/`; the shared runtime interface is
+`src/platform/backend.zig`. `nn.Weight` carries its backend, so the GPU dispatch/cache logic can be
+tested with a mock and no device. Both backends use the same weight-cache design:
+
+- Every GEMM weight is held as `core.nn.Weight`, which owns a permanent device buffer created when
+  the layer loads. A forward pass only uploads activations and downloads the result; weights are
+  never copied again.
+- Activations and results use per-thread scratch buffers. Metal caches `MPSMatrixMultiplication`
+  kernels by shape; CUDA uses one cuBLAS handle and one non-blocking stream per host thread.
+- Any failure (no device, missing library, allocation or command error) returns to the CPU
+  BLAS/SIMD path, so a GPU build is never worse than "unavailable".
+
+The CUDA backend loads `libcudart`/`libcublas` with `dlopen`, so building it needs no CUDA toolkit,
+headers, or link-time libraries. A normal CUDA installation is found automatically. To use a
+private copy, point `TSFM_CUDA_LIB_DIR` at a directory holding `libcudart.so.13`,
+`libcublas.so.13` and `libcublasLt.so.13` (12.x also works). Only the driver (`libcuda.so`) must be
+installed system-wide.
+
+The dispatch threshold is backend-specific. MPS has a high per-call cost (~0.4 ms on an M4), so
+Metal uses the GPU only above `2^28` multiply-adds. cuBLAS is much cheaper per call, so CUDA starts
+at `2^20` for registered weights and `2^24` for activation products. The load-time copy is why both
+backends are opt-in: the GPU build duplicates the model's GEMM weights in private memory (~111 MB
+for Timestral-28M, ~478 MB for Chronos-2).
+
+Warm measurements with `--horizon 96` and 512 context steps (load excluded). The CUDA numbers are
+from an RTX 3060 Laptop (6 GB) with an i7-11800H; the CPU column is this project's builtin SIMD
+kernel, since no OpenBLAS was installed. CUDA is effectively flat across thread counts because
+cuBLAS parallelizes internally.
+
+| workload | CPU t=1 | CUDA t=1 | CPU t=4 | CUDA t=4 |
+|---|---|---|---|---|
+| Timestral-28M, 1 series | 109 ms | 66 ms | 30 ms | 59 ms |
+| Timestral-28M, 16 series | 736 ms | 160 ms | 183 ms | 110 ms |
+| Timestral-28M, 256 series | 12.8 s | 2.50 s | 3.49 s | 1.14 s |
+| Chronos-2, 1 series | 388 ms | 99 ms | 105 ms | 97 ms |
+| Chronos-2, 16 series | 2.88 s | 237 ms | 718 ms | 215 ms |
+| Chronos-2, 256 series | 44.0 s | 2.82 s | 12.5 s | 2.38 s |
+| Chronos-2, 1 series, 8192 context | 2.64 s | 325 ms | — | — |
+
+For comparison, the Metal backend is roughly CPU parity on an M4 after the weight cache (see
+`docs/plans/gpu-metal.md`): MPS's per-call overhead is much higher than cuBLAS's. CUDA is the
+backend that turns the GPU into a clear win on this model family.
+
+```bash
+zig build --release=fast -Dgpu=cuda
+TSFM_CUDA_LIB_DIR=$HOME/.local/lib/tsfm-cuda ./zig-out/bin/timestral ...
+```
 
 ## Adding a model family
 
@@ -98,6 +149,7 @@ Other options: `--threads N` (default: one per logical CPU; `1` is single-thread
 | option | values | default |
 |---|---|---|
 | `-Dblas=` | `accelerate`, `openblas`, `builtin` | `accelerate` on macOS, `builtin` elsewhere |
+| `-Dgpu=` | `metal` (macOS), `cuda` (Linux/NVIDIA), `none` | `none` |
 
 `builtin` is about 1.5x slower than Accelerate on the 28M Timestral model (16 vs 10 ms on an
 Apple Silicon laptop); use `-Dblas=openblas` on Linux for speed. The builtin kernels tile the

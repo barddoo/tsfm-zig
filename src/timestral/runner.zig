@@ -30,7 +30,7 @@ pub fn run(req: *const family.Request) !family.Forecast {
     var weights = try st.Weights.open(io, allocator, w_path);
     defer weights.close(io);
     weights.prefetch(req.prefetch);
-    var model = try model_mod.Model.load(io, allocator, parsed.value, &weights);
+    var model = try model_mod.Model.load(io, allocator, core.nn.defaultBackend(), parsed.value, &weights);
     defer model.deinit(allocator);
     const t_loaded = sys.now(io);
 

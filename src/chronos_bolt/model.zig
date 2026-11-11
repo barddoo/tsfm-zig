@@ -19,28 +19,48 @@ const ResBlock = core.resblock.ResBlock;
 const Allocator = std.mem.Allocator;
 
 const EncLayer = struct {
-    attn_norm: []const f32,
-    q: []const f32,
-    k: []const f32,
-    v: []const f32,
-    o: []const f32,
-    ffn_norm: []const f32,
-    wi: []const f32,
-    wo: []const f32,
+    attn_norm: []const f32 = &.{},
+    q: nn.Weight = .{},
+    k: nn.Weight = .{},
+    v: nn.Weight = .{},
+    o: nn.Weight = .{},
+    ffn_norm: []const f32 = &.{},
+    wi: nn.Weight = .{},
+    wo: nn.Weight = .{},
+
+    fn deinit(self: *const EncLayer) void {
+        self.q.deinit();
+        self.k.deinit();
+        self.v.deinit();
+        self.o.deinit();
+        self.wi.deinit();
+        self.wo.deinit();
+    }
 };
 
 const DecLayer = struct {
-    self_norm: []const f32,
-    self_v: []const f32,
-    self_o: []const f32,
-    cross_norm: []const f32,
-    cross_q: []const f32,
-    cross_k: []const f32,
-    cross_v: []const f32,
-    cross_o: []const f32,
-    ffn_norm: []const f32,
-    wi: []const f32,
-    wo: []const f32,
+    self_norm: []const f32 = &.{},
+    self_v: nn.Weight = .{},
+    self_o: nn.Weight = .{},
+    cross_norm: []const f32 = &.{},
+    cross_q: nn.Weight = .{},
+    cross_k: nn.Weight = .{},
+    cross_v: nn.Weight = .{},
+    cross_o: nn.Weight = .{},
+    ffn_norm: []const f32 = &.{},
+    wi: nn.Weight = .{},
+    wo: nn.Weight = .{},
+
+    fn deinit(self: *const DecLayer) void {
+        self.self_v.deinit();
+        self.self_o.deinit();
+        self.cross_q.deinit();
+        self.cross_k.deinit();
+        self.cross_v.deinit();
+        self.cross_o.deinit();
+        self.wi.deinit();
+        self.wo.deinit();
+    }
 };
 
 fn tensorName(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
@@ -64,6 +84,7 @@ pub fn relativeBucket(rel: i64, num_buckets: u32, max_distance: u32) usize {
 
 pub const Model = struct {
     config: cfg.Config,
+    backend: ?nn.Backend,
     input_embed: ResBlock,
     output_embed: ResBlock,
     /// `(vocab, d_model)`: row `decoder_start_token_id` starts the decoder, row `reg_token_id` is [REG].
@@ -75,7 +96,7 @@ pub const Model = struct {
     dec_layers: []DecLayer,
     dec_final_norm: []const f32,
 
-    pub fn load(io: std.Io, allocator: Allocator, config: cfg.Config, w: *st.Weights) !Model {
+    pub fn load(io: std.Io, allocator: Allocator, backend: ?nn.Backend, config: cfg.Config, w: *st.Weights) !Model {
         const d: usize = config.d_model;
         const ff: usize = config.d_ff;
         const inner = config.inner();
@@ -84,8 +105,10 @@ pub const Model = struct {
         const out_dim = nq * @as(usize, config.chronos_config.prediction_length);
         var buf: [256]u8 = undefined;
 
-        const input_embed = try ResBlock.load(io, w, &buf, "input_patch_embedding", 2 * ps, ff, d);
-        const output_embed = try ResBlock.load(io, w, &buf, "output_patch_embedding", d, ff, out_dim);
+        const input_embed = try ResBlock.load(io, backend, w, &buf, "input_patch_embedding", 2 * ps, ff, d);
+        errdefer input_embed.deinit();
+        const output_embed = try ResBlock.load(io, backend, w, &buf, "output_patch_embedding", d, ff, out_dim);
+        errdefer output_embed.deinit();
         const shared = try w.get(io, "shared.weight", config.vocabSize() * d);
         const rel_bias = try w.get(io, "encoder.block.0.layer.0.SelfAttention.relative_attention_bias.weight", @as(usize, config.relative_attention_num_buckets) * config.num_heads);
         const enc_final = try w.get(io, "encoder.final_layer_norm.weight", d);
@@ -93,39 +116,48 @@ pub const Model = struct {
 
         const enc = try allocator.alloc(EncLayer, config.num_layers);
         errdefer allocator.free(enc);
+        var enc_loaded: usize = 0;
+        errdefer for (enc[0..enc_loaded]) |*l| l.deinit();
         for (enc, 0..) |*l, i| {
             l.* = .{
                 .attn_norm = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.0.layer_norm.weight", .{i}), d),
-                .q = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.0.SelfAttention.q.weight", .{i}), inner * d),
-                .k = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.0.SelfAttention.k.weight", .{i}), inner * d),
-                .v = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.0.SelfAttention.v.weight", .{i}), inner * d),
-                .o = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.0.SelfAttention.o.weight", .{i}), d * inner),
-                .ffn_norm = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.1.layer_norm.weight", .{i}), d),
-                .wi = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.1.DenseReluDense.wi.weight", .{i}), ff * d),
-                .wo = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.1.DenseReluDense.wo.weight", .{i}), d * ff),
             };
+            errdefer l.deinit();
+            l.q = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.0.SelfAttention.q.weight", .{i}), inner * d));
+            l.k = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.0.SelfAttention.k.weight", .{i}), inner * d));
+            l.v = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.0.SelfAttention.v.weight", .{i}), inner * d));
+            l.o = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.0.SelfAttention.o.weight", .{i}), d * inner));
+            l.ffn_norm = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.1.layer_norm.weight", .{i}), d);
+            l.wi = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.1.DenseReluDense.wi.weight", .{i}), ff * d));
+            l.wo = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.1.DenseReluDense.wo.weight", .{i}), d * ff));
+            enc_loaded = i + 1;
         }
 
         const dec = try allocator.alloc(DecLayer, config.num_decoder_layers);
         errdefer allocator.free(dec);
+        var dec_loaded: usize = 0;
+        errdefer for (dec[0..dec_loaded]) |*l| l.deinit();
         for (dec, 0..) |*l, i| {
             l.* = .{
                 .self_norm = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.0.layer_norm.weight", .{i}), d),
-                .self_v = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.0.SelfAttention.v.weight", .{i}), inner * d),
-                .self_o = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.0.SelfAttention.o.weight", .{i}), d * inner),
-                .cross_norm = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.1.layer_norm.weight", .{i}), d),
-                .cross_q = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.1.EncDecAttention.q.weight", .{i}), inner * d),
-                .cross_k = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.1.EncDecAttention.k.weight", .{i}), inner * d),
-                .cross_v = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.1.EncDecAttention.v.weight", .{i}), inner * d),
-                .cross_o = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.1.EncDecAttention.o.weight", .{i}), d * inner),
-                .ffn_norm = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.2.layer_norm.weight", .{i}), d),
-                .wi = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.2.DenseReluDense.wi.weight", .{i}), ff * d),
-                .wo = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.2.DenseReluDense.wo.weight", .{i}), d * ff),
             };
+            errdefer l.deinit();
+            l.self_v = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.0.SelfAttention.v.weight", .{i}), inner * d));
+            l.self_o = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.0.SelfAttention.o.weight", .{i}), d * inner));
+            l.cross_norm = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.1.layer_norm.weight", .{i}), d);
+            l.cross_q = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.1.EncDecAttention.q.weight", .{i}), inner * d));
+            l.cross_k = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.1.EncDecAttention.k.weight", .{i}), inner * d));
+            l.cross_v = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.1.EncDecAttention.v.weight", .{i}), inner * d));
+            l.cross_o = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.1.EncDecAttention.o.weight", .{i}), d * inner));
+            l.ffn_norm = try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.2.layer_norm.weight", .{i}), d);
+            l.wi = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.2.DenseReluDense.wi.weight", .{i}), ff * d));
+            l.wo = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "decoder.block.{d}.layer.2.DenseReluDense.wo.weight", .{i}), d * ff));
+            dec_loaded = i + 1;
         }
 
         return .{
             .config = config,
+            .backend = backend,
             .input_embed = input_embed,
             .output_embed = output_embed,
             .shared = shared,
@@ -138,6 +170,10 @@ pub const Model = struct {
     }
 
     pub fn deinit(self: *Model, allocator: Allocator) void {
+        self.input_embed.deinit();
+        self.output_embed.deinit();
+        for (self.enc_layers) |*l| l.deinit();
+        for (self.dec_layers) |*l| l.deinit();
         allocator.free(self.enc_layers);
         allocator.free(self.dec_layers);
     }
@@ -201,7 +237,7 @@ pub const Model = struct {
             nn.linear(io, qb, xn, rows, l.q, inner, d, null);
             nn.linear(io, kb, xn, rows, l.k, inner, d, null);
             nn.linear(io, vb, xn, rows, l.v, inner, d, null);
-            const job: SelfJob = .{ .q = qb, .k = kb, .v = vb, .o = ab, .bias = bias, .key_valid = key_valid, .keys_all_valid = keys_all_valid, .seq = seq, .inner = inner, .nh = nh, .hd = hd };
+            const job: SelfJob = .{ .backend = self.backend, .q = qb, .k = kb, .v = vb, .o = ab, .bias = bias, .key_valid = key_valid, .keys_all_valid = keys_all_valid, .seq = seq, .inner = inner, .nh = nh, .hd = hd };
             core.par.forRange(io, nb * nh, &job, SelfJob.attend);
             nn.linear(io, delta, ab, rows, l.o, d, inner, null);
             nn.addInPlace(x, delta[0..x.len]);
@@ -277,6 +313,7 @@ pub const Model = struct {
 
 /// Encoder self-attention, one `(series, head)` per item, through the shared comptime-masked kernel.
 const SelfJob = struct {
+    backend: ?nn.Backend,
     q: []const f32,
     k: []const f32,
     v: []const f32,
@@ -301,7 +338,7 @@ const SelfJob = struct {
             const r = item / self.nh;
             const h = item % self.nh;
             const off = r * seq * self.inner + h * hd;
-            core.attn.selfAttendRuntime(mask, scores, self.q[off..], self.k[off..], self.v[off..], self.o[off..], strides, seq, self.hd, 1.0, self.key_valid[r * seq ..][0..seq], self.bias[h * seq * seq ..][0 .. seq * seq]);
+            core.attn.selfAttendRuntime(mask, self.backend, scores, self.q[off..], self.k[off..], self.v[off..], self.o[off..], strides, seq, self.hd, 1.0, self.key_valid[r * seq ..][0..seq], self.bias[h * seq * seq ..][0 .. seq * seq]);
         }
     }
 };
@@ -344,7 +381,7 @@ const CrossJob = struct {
 // Bucket ids from `T5Attention._relative_position_bucket(arange(-140, 141), bidirectional=True,
 // num_buckets=32, max_distance=128)` in transformers, so the float32 log boundaries are checked.
 test "relativeBucket matches transformers for -140..140" {
-    const expected = [_]u8{ 15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,15,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,13,12,12,12,12,12,12,12,12,12,12,12,12,12,12,11,11,11,11,11,11,11,11,11,10,10,10,10,10,10,10,9,9,9,9,8,8,8,8,7,6,5,4,3,2,1,0,17,18,19,20,21,22,23,24,24,24,24,25,25,25,25,26,26,26,26,26,26,26,27,27,27,27,27,27,27,27,27,28,28,28,28,28,28,28,28,28,28,28,28,28,28,29,29,29,29,29,29,29,29,29,29,29,29,29,29,29,29,29,29,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31 };
+    const expected = [_]u8{ 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 12, 11, 11, 11, 11, 11, 11, 11, 11, 11, 10, 10, 10, 10, 10, 10, 10, 9, 9, 9, 9, 8, 8, 8, 8, 7, 6, 5, 4, 3, 2, 1, 0, 17, 18, 19, 20, 21, 22, 23, 24, 24, 24, 24, 25, 25, 25, 25, 26, 26, 26, 26, 26, 26, 26, 27, 27, 27, 27, 27, 27, 27, 27, 27, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 28, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 29, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 30, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31 };
     for (expected, 0..) |want, i| {
         const rel: i64 = @as(i64, @intCast(i)) - 140;
         try std.testing.expectEqual(@as(usize, want), relativeBucket(rel, 32, 128));

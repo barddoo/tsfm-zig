@@ -4,14 +4,63 @@
 
 const std = @import("std");
 const c = @import("c");
+const gpu = @import("gpu");
+const backend_mod = @import("backend");
 const par = @import("par.zig");
 
 /// Whether `gemmNT` (the large products) goes to a C BLAS (Accelerate, OpenBLAS); otherwise the
-/// builtin SIMD kernel runs. `gemmNN` (attention output) always uses the builtin kernel.
+/// builtin SIMD kernel runs. With a GPU backend, large products are dispatched there instead.
 pub const has_blas = @hasDecl(c, "cblas_sgemm");
+pub const has_gpu = gpu.has_gpu;
 
-/// `C[m, n] = alpha * A[m, k] @ B^T` with B stored `[n, k]`, explicit row strides.
-pub fn gemmNT(cc: []f32, ldc: usize, a: []const f32, lda: usize, b: []const f32, ldb: usize, m: usize, n: usize, k: usize, alpha: f32) void {
+/// The selected backend, or null with `-Dgpu=none`.
+pub const Backend = backend_mod.Backend;
+
+pub fn defaultBackend() ?Backend {
+    return gpu.context();
+}
+
+/// A matrix weight: the host slice plus its permanent GPU copy, uploaded once at load time.
+/// The handle is null when built without a GPU backend (or if the upload failed).
+pub const Weight = struct {
+    data: []const f32 = &.{},
+    handle: ?*anyopaque = null,
+    backend: ?Backend = null,
+
+    pub fn init(data: []const f32) Weight {
+        return initWith(defaultBackend(), data);
+    }
+
+    pub fn initWith(b: ?Backend, data: []const f32) Weight {
+        if (b) |be| return .{ .data = data, .handle = be.registerWeight(data), .backend = be };
+        return .{ .data = data };
+    }
+
+    /// Release the GPU copy (if any). The host slice is owned by the checkpoint mapping or by the
+    /// caller that allocated it, and is not freed here.
+    pub fn deinit(self: *const Weight) void {
+        if (self.backend) |be| be.releaseWeight(self.handle);
+    }
+};
+
+/// `C[m, n] = alpha * A[m, k] @ B^T` with B stored `[n, k]`, explicit row strides. `b` is the
+/// execution backend (null selects the CPU); attention passes the model's backend here.
+pub fn gemmNT(b: ?Backend, cc: []f32, ldc: usize, a: []const f32, lda: usize, bmat: []const f32, ldb: usize, m: usize, n: usize, k: usize, alpha: f32) void {
+    if (b) |be| {
+        if (m * n * k >= be.activationMinOps()) {
+            if (be.sgemmNT(.{ .m = m, .n = n, .k = k, .alpha = alpha, .a = a, .lda = lda, .b = bmat, .ldb = ldb, .out = cc, .ldc = ldc }, null)) return;
+        }
+    }
+    gemmNTFallback(cc, ldc, a, lda, bmat, ldb, m, n, k, alpha);
+}
+
+/// CPU-only variant for `linear`'s weight products: those must not fall into the activation
+/// heuristic above, which would re-upload the weight on every call.
+fn gemmNTWeight(cc: []f32, ldc: usize, a: []const f32, lda: usize, b: []const f32, ldb: usize, m: usize, n: usize, k: usize, alpha: f32) void {
+    gemmNTFallback(cc, ldc, a, lda, b, ldb, m, n, k, alpha);
+}
+
+fn gemmNTFallback(cc: []f32, ldc: usize, a: []const f32, lda: usize, b: []const f32, ldb: usize, m: usize, n: usize, k: usize, alpha: f32) void {
     if (comptime has_blas) {
         c.cblas_sgemm(c.CblasRowMajor, c.CblasNoTrans, c.CblasTrans, @intCast(m), @intCast(n), @intCast(k), alpha, a.ptr, @intCast(lda), b.ptr, @intCast(ldb), 0.0, cc.ptr, @intCast(ldc));
         return;
@@ -108,7 +157,12 @@ pub fn gemmNT(cc: []f32, ldc: usize, a: []const f32, lda: usize, b: []const f32,
 }
 
 /// `C[m, n] = A[m, k] @ B[k, n]` with explicit row strides.
-pub fn gemmNN(cc: []f32, ldc: usize, a: []const f32, lda: usize, b: []const f32, ldb: usize, m: usize, n: usize, k: usize) void {
+pub fn gemmNN(be_opt: ?Backend, cc: []f32, ldc: usize, a: []const f32, lda: usize, b: []const f32, ldb: usize, m: usize, n: usize, k: usize) void {
+    if (be_opt) |be| {
+        if (m * n * k >= be.activationMinOps()) {
+            if (be.sgemmNN(.{ .m = m, .n = n, .k = k, .a = a, .lda = lda, .b = b, .ldb = ldb, .out = cc, .ldc = ldc })) return;
+        }
+    }
     if (comptime has_blas) {
         c.cblas_sgemm(c.CblasRowMajor, c.CblasNoTrans, c.CblasNoTrans, @intCast(m), @intCast(n), @intCast(k), 1.0, a.ptr, @intCast(lda), b.ptr, @intCast(ldb), 0.0, cc.ptr, @intCast(ldc));
         return;
@@ -179,7 +233,7 @@ const LinearCtx = struct {
     y: []f32,
     x: []const f32,
     rows: usize,
-    w: []const f32,
+    w: Weight,
     out: usize,
     in: usize,
     bias: ?[]const f32,
@@ -187,7 +241,7 @@ const LinearCtx = struct {
 
 /// Output columns `[j0, j1)` of a linear layer; the weight rows of those columns are contiguous.
 fn linearCols(ctx: *const LinearCtx, j0: usize, j1: usize) void {
-    gemmNT(ctx.y[j0..], ctx.out, ctx.x, ctx.in, ctx.w[j0 * ctx.in ..], ctx.in, ctx.rows, j1 - j0, ctx.in, 1.0);
+    gemmNTWeight(ctx.y[j0..], ctx.out, ctx.x, ctx.in, ctx.w.data[j0 * ctx.in ..], ctx.in, ctx.rows, j1 - j0, ctx.in, 1.0);
     if (ctx.bias) |b| {
         for (0..ctx.rows) |r| addInPlace(ctx.y[r * ctx.out + j0 ..][0 .. j1 - j0], b[j0..j1]);
     }
@@ -201,9 +255,21 @@ fn linearBlocks(ctx: *const LinearCtx, b0: usize, b1: usize) void {
 }
 
 /// `y[rows, out] = x[rows, in] @ w[out, in]^T`, plus `bias[out]` when given. Large products are
-/// split by output columns across the thread pool.
-pub fn linear(io: std.Io, y: []f32, x: []const f32, rows: usize, w: []const f32, out: usize, in: usize, bias: ?[]const f32) void {
-    std.debug.assert(y.len >= rows * out and x.len >= rows * in and w.len == out * in);
+/// split by output columns across the thread pool. With a GPU backend a registered weight is
+/// multiplied from its permanent buffer; the copy that remains is only the activation and result.
+pub fn linear(io: std.Io, y: []f32, x: []const f32, rows: usize, w: Weight, out: usize, in: usize, bias: ?[]const f32) void {
+    std.debug.assert(y.len >= rows * out and x.len >= rows * in and w.data.len == out * in);
+    if (w.backend) |be| {
+        if (w.handle != null and rows * out * in >= be.linearMinOps()) {
+            // The backend handles internal parallelism; column-blocking would create multiple
+            // calls with per-call overhead for no benefit.
+            const args: backend_mod.Gemm = .{ .m = rows, .n = out, .k = in, .alpha = 1.0, .a = x, .lda = in, .b = w.data, .ldb = in, .out = y, .ldc = out };
+            if (be.sgemmNT(args, w.handle)) {
+                if (bias) |b| for (0..rows) |r| addInPlace(y[r * out ..][0..out], b);
+                return;
+            }
+        }
+    }
     const ctx: LinearCtx = .{ .y = y, .x = x, .rows = rows, .w = w, .out = out, .in = in, .bias = bias };
     // Always use the same column blocking, even on one thread: the C BLAS may pick a different
     // kernel (and rounding) for a different `n`, which would make the output depend on the

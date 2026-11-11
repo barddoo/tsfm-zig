@@ -16,40 +16,55 @@ const Allocator = std.mem.Allocator;
 const ResBlock = core.resblock.ResBlock;
 
 const Attn = struct {
-    norm: []const f32,
-    q: []const f32,
-    k: []const f32,
-    v: []const f32,
-    o: []const f32,
+    norm: []const f32 = &.{},
+    q: nn.Weight = .{},
+    k: nn.Weight = .{},
+    v: nn.Weight = .{},
+    o: nn.Weight = .{},
+
+    fn deinit(self: *const Attn) void {
+        self.q.deinit();
+        self.k.deinit();
+        self.v.deinit();
+        self.o.deinit();
+    }
 };
 
 const Layer = struct {
-    time: Attn,
-    group: Attn,
-    mlp_norm: []const f32,
-    wi: []const f32,
-    wo: []const f32,
+    time: Attn = .{},
+    group: Attn = .{},
+    mlp_norm: []const f32 = &.{},
+    wi: nn.Weight = .{},
+    wo: nn.Weight = .{},
+
+    fn deinit(self: *const Layer) void {
+        self.time.deinit();
+        self.group.deinit();
+        self.wi.deinit();
+        self.wo.deinit();
+    }
 };
 
 fn tensorName(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
     return std.fmt.bufPrint(buf, fmt, args) catch unreachable;
 }
 
-fn loadAttn(io: std.Io, w: *st.Weights, buf: []u8, layer: usize, which: usize, d: usize) !Attn {
+fn loadAttn(io: std.Io, backend: ?nn.Backend, w: *st.Weights, buf: []u8, layer: usize, which: usize, d: usize) !Attn {
     // A private prefix buffer: `buf` is reused for the tensor names below.
     var pbuf: [128]u8 = undefined;
     const p = tensorName(&pbuf, "encoder.block.{d}.layer.{d}.", .{ layer, which });
-    return .{
-        .norm = try w.get(io, tensorName(buf, "{s}layer_norm.weight", .{p}), d),
-        .q = try w.get(io, tensorName(buf, "{s}self_attention.q.weight", .{p}), d * d),
-        .k = try w.get(io, tensorName(buf, "{s}self_attention.k.weight", .{p}), d * d),
-        .v = try w.get(io, tensorName(buf, "{s}self_attention.v.weight", .{p}), d * d),
-        .o = try w.get(io, tensorName(buf, "{s}self_attention.o.weight", .{p}), d * d),
-    };
+    var a: Attn = .{ .norm = try w.get(io, tensorName(buf, "{s}layer_norm.weight", .{p}), d) };
+    errdefer a.deinit();
+    a.q = nn.Weight.initWith(backend, try w.get(io, tensorName(buf, "{s}self_attention.q.weight", .{p}), d * d));
+    a.k = nn.Weight.initWith(backend, try w.get(io, tensorName(buf, "{s}self_attention.k.weight", .{p}), d * d));
+    a.v = nn.Weight.initWith(backend, try w.get(io, tensorName(buf, "{s}self_attention.v.weight", .{p}), d * d));
+    a.o = nn.Weight.initWith(backend, try w.get(io, tensorName(buf, "{s}self_attention.o.weight", .{p}), d * d));
+    return a;
 }
 
 pub const Model = struct {
     config: cfg.Config,
+    backend: ?nn.Backend,
     input_embed: ResBlock,
     layers: []Layer,
     final_norm: []const f32,
@@ -57,28 +72,34 @@ pub const Model = struct {
     reg: []const f32,
     inv_freq: []f32,
 
-    pub fn load(io: std.Io, allocator: Allocator, config: cfg.Config, w: *st.Weights) !Model {
+    pub fn load(io: std.Io, allocator: Allocator, backend: ?nn.Backend, config: cfg.Config, w: *st.Weights) !Model {
         const d: usize = config.d_model;
         const ps: usize = config.chronos_config.input_patch_size;
         const hid: usize = config.d_ff;
         const q: usize = config.numQuantiles();
         var buf: [256]u8 = undefined;
 
-        const input_embed = try ResBlock.load(io, w, &buf, "input_patch_embedding", 3 * ps, hid, d);
-        const output_embed = try ResBlock.load(io, w, &buf, "output_patch_embedding", d, hid, q * ps);
+        const input_embed = try ResBlock.load(io, backend, w, &buf, "input_patch_embedding", 3 * ps, hid, d);
+        errdefer input_embed.deinit();
+        const output_embed = try ResBlock.load(io, backend, w, &buf, "output_patch_embedding", d, hid, q * ps);
+        errdefer output_embed.deinit();
         const final_norm = try w.get(io, "encoder.final_layer_norm.weight", d);
         const shared = try w.get(io, "shared.weight", 2 * d);
         const reg = shared[d .. 2 * d];
 
         const layers = try allocator.alloc(Layer, config.num_layers);
         errdefer allocator.free(layers);
+        var n_loaded: usize = 0;
+        errdefer for (layers[0..n_loaded]) |*layer| layer.deinit();
         for (0..config.num_layers) |li| {
-            const time = try loadAttn(io, w, &buf, li, 0, d);
-            const group = try loadAttn(io, w, &buf, li, 1, d);
-            const mlp_norm = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.2.layer_norm.weight", .{li}), d);
-            const wi = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.2.mlp.wi.weight", .{li}), hid * d);
-            const wo = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.2.mlp.wo.weight", .{li}), d * hid);
-            layers[li] = .{ .time = time, .group = group, .mlp_norm = mlp_norm, .wi = wi, .wo = wo };
+            var layer: Layer = .{ .mlp_norm = try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.2.layer_norm.weight", .{li}), d) };
+            errdefer layer.deinit();
+            layer.time = try loadAttn(io, backend, w, &buf, li, 0, d);
+            layer.group = try loadAttn(io, backend, w, &buf, li, 1, d);
+            layer.wi = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.2.mlp.wi.weight", .{li}), hid * d));
+            layer.wo = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "encoder.block.{d}.layer.2.mlp.wo.weight", .{li}), d * hid));
+            layers[li] = layer;
+            n_loaded = li + 1;
         }
 
         const hd: usize = config.headDim();
@@ -91,6 +112,7 @@ pub const Model = struct {
 
         return .{
             .config = config,
+            .backend = backend,
             .input_embed = input_embed,
             .layers = layers,
             .final_norm = final_norm,
@@ -101,6 +123,9 @@ pub const Model = struct {
     }
 
     pub fn deinit(self: *Model, allocator: Allocator) void {
+        self.input_embed.deinit();
+        self.output_embed.deinit();
+        for (self.layers) |*layer| layer.deinit();
         allocator.free(self.layers);
         allocator.free(self.inv_freq);
     }
@@ -218,6 +243,7 @@ pub const Model = struct {
         }
 
         const job: TimeJob = .{
+            .backend = self.backend,
             .q = qb,
             .k = kb,
             .v = vb,
@@ -247,6 +273,7 @@ pub const Model = struct {
 };
 
 const TimeJob = struct {
+    backend: ?nn.Backend,
     q: []const f32,
     k: []const f32,
     v: []const f32,
@@ -274,7 +301,7 @@ const TimeJob = struct {
             const kv = self.key_valid[r * seq ..][0..seq];
 
             const mask = core.attn.Mask.pick(false, self.keys_all_valid, true);
-            core.attn.selfAttendRuntime(mask, scores, self.q[base + off ..], self.k[base + off ..], self.v[base + off ..], self.o[base + off ..], .{ .q = d, .k = d, .v = d, .o = d }, seq, hd, 1.0, kv, null);
+            core.attn.selfAttendRuntime(mask, self.backend, scores, self.q[base + off ..], self.k[base + off ..], self.v[base + off ..], self.o[base + off ..], .{ .q = d, .k = d, .v = d, .o = d }, seq, hd, 1.0, kv, null);
         }
     }
 };

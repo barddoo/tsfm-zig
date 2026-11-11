@@ -69,6 +69,7 @@ pub inline fn maskedSoftmax(comptime mask: Mask, scores: []f32, n: usize, key_va
 /// an optional additive `n x n` score bias (row stride `n`), applied before the mask.
 pub fn selfAttend(
     comptime mask: Mask,
+    b: ?nn.Backend,
     scores: []f32,
     q: []const f32,
     k: []const f32,
@@ -81,15 +82,16 @@ pub fn selfAttend(
     key_valid: []const bool,
     bias: ?[]const f32,
 ) void {
-    nn.gemmNT(scores, n, q, st.q, k, st.k, n, n, hd, scale);
-    if (bias) |b| nn.addInPlace(scores[0 .. n * n], b[0 .. n * n]);
+    nn.gemmNT(b, scores, n, q, st.q, k, st.k, n, n, hd, scale);
+    if (bias) |bv| nn.addInPlace(scores[0 .. n * n], bv[0 .. n * n]);
     maskedSoftmax(mask, scores, n, key_valid);
-    nn.gemmNN(o, st.o, scores, n, v, st.v, n, hd, n);
+    nn.gemmNN(b, o, st.o, scores, n, v, st.v, n, hd, n);
 }
 
 /// `selfAttend` with the mask chosen at run time: one specialized copy per variant.
 pub fn selfAttendRuntime(
     mask: Mask,
+    b: ?nn.Backend,
     scores: []f32,
     q: []const f32,
     k: []const f32,
@@ -103,7 +105,7 @@ pub fn selfAttendRuntime(
     bias: ?[]const f32,
 ) void {
     switch (mask) {
-        inline else => |m| selfAttend(m, scores, q, k, v, o, st, n, hd, scale, key_valid, bias),
+        inline else => |m| selfAttend(m, b, scores, q, k, v, o, st, n, hd, scale, key_valid, bias),
     }
 }
 
@@ -166,13 +168,13 @@ test "every mask, with and without a bias, matches a naive reference (strided q/
             var scores: [n * n]f32 = undefined;
             var got: [n * hd]f32 = undefined;
             var want: [n * hd]f64 = undefined;
-            selfAttend(mask, &scores, q, k, v, &got, st, n, hd, 0.35, &key_valid, bias);
+            selfAttend(mask, null, &scores, q, k, v, &got, st, n, hd, 0.35, &key_valid, bias);
             referenceAttend(mask, &want, q, k, v, st, n, hd, 0.35, &key_valid, bias);
             for (got, want) |g, w| try std.testing.expectApproxEqAbs(@as(f32, @floatCast(w)), g, 1e-4);
 
             // The runtime dispatcher must hit the same variant.
             var got_rt: [n * hd]f32 = undefined;
-            selfAttendRuntime(mask, &scores, q, k, v, &got_rt, st, n, hd, 0.35, &key_valid, bias);
+            selfAttendRuntime(mask, null, &scores, q, k, v, &got_rt, st, n, hd, 0.35, &key_valid, bias);
             try std.testing.expectEqualSlices(f32, &got, &got_rt);
         }
     }

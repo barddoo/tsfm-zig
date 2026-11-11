@@ -1,6 +1,9 @@
 //! Chronos-2 inference configuration, parsed from the checkpoint's `config.json`.
 
 const std = @import("std");
+const core = @import("core");
+
+pub const architecture = "Chronos2Model";
 
 pub const Config = struct {
     d_model: u32,
@@ -61,13 +64,8 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8) !Parsed {
 }
 
 /// Whether `config.json` describes a Chronos-2 checkpoint (`architectures` contains
-/// `Chronos2Model`).
+/// `Chronos2Model`). Malformed configs (not a JSON object, `architectures` not an array) are
+/// simply not Chronos-2.
 pub fn isChronos2(allocator: std.mem.Allocator, text: []const u8) !bool {
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
-    defer parsed.deinit();
-    const arch = parsed.value.object.get("architectures") orelse return false;
-    for (arch.array.items) |item| {
-        if (item == .string and std.mem.eql(u8, item.string, "Chronos2Model")) return true;
-    }
-    return false;
+    return core.family.hasArchitecture(allocator, text, architecture);
 }

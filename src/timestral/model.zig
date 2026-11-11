@@ -15,17 +15,28 @@ const par = core.par;
 const Allocator = std.mem.Allocator;
 
 const Linear = struct {
-    w: []const f32,
+    w: nn.Weight = .{},
     b: ?[]const f32 = null,
+
+    fn deinit(self: *const Linear) void {
+        self.w.deinit();
+    }
 };
 
 const Attn = struct {
-    is_time: bool,
-    norm: []const f32,
+    is_time: bool = false,
+    norm: []const f32 = &.{},
     /// Fused `[q ; k ; v]` projection, rows permuted to `(qkv, head, head_dim)` at load time.
-    qkv: []f32,
-    out: []const f32,
-    gate: ?[]const f32,
+    qkv: nn.Weight = .{},
+    out: nn.Weight = .{},
+    gate: ?nn.Weight = null,
+
+    fn deinit(self: *const Attn, allocator: Allocator) void {
+        self.qkv.deinit();
+        allocator.free(self.qkv.data); // only the permuted q/k/v copy is owned by the model
+        self.out.deinit();
+        if (self.gate) |g| g.deinit();
+    }
 };
 
 const MlpAct = struct {
@@ -45,28 +56,38 @@ const MlpAct = struct {
 const Layer = struct {
     attns: [2]Attn,
     n_attn: usize,
-    mlp_norm: []const f32,
-    w12: []const f32,
-    w3: []const f32,
+    mlp_norm: []const f32 = &.{},
+    w12: nn.Weight = .{},
+    w3: nn.Weight = .{},
+
+    fn deinit(self: *const Layer, allocator: Allocator) void {
+        for (self.attns[0..self.n_attn]) |*a| a.deinit(allocator);
+        self.w12.deinit();
+        self.w3.deinit();
+    }
 };
 
 const ResBlock = struct {
-    hidden: Linear,
-    output: Linear,
-    residual: Linear,
-    in: usize,
-    hid: usize,
-    out: usize,
+    hidden: Linear = .{},
+    output: Linear = .{},
+    residual: Linear = .{},
+    in: usize = 0,
+    hid: usize = 0,
+    out: usize = 0,
 
-    fn load(io: std.Io, w: *st.Weights, buf: []u8, prefix: []const u8, in: usize, hid: usize, out: usize, bias: bool) !ResBlock {
-        return .{
-            .hidden = try loadLinear(io, w, buf, prefix, "hidden_layer", hid, in, bias),
-            .output = try loadLinear(io, w, buf, prefix, "output_layer", out, hid, bias),
-            .residual = try loadLinear(io, w, buf, prefix, "residual_layer", out, in, bias),
-            .in = in,
-            .hid = hid,
-            .out = out,
-        };
+    fn load(io: std.Io, backend: ?nn.Backend, w: *st.Weights, buf: []u8, prefix: []const u8, in: usize, hid: usize, out: usize, bias: bool) !ResBlock {
+        var block: ResBlock = .{ .in = in, .hid = hid, .out = out };
+        errdefer block.deinit();
+        block.hidden = try loadLinear(io, backend, w, buf, prefix, "hidden_layer", hid, in, bias);
+        block.output = try loadLinear(io, backend, w, buf, prefix, "output_layer", out, hid, bias);
+        block.residual = try loadLinear(io, backend, w, buf, prefix, "residual_layer", out, in, bias);
+        return block;
+    }
+
+    fn deinit(self: *const ResBlock) void {
+        self.hidden.deinit();
+        self.output.deinit();
+        self.residual.deinit();
     }
 
     /// `output(silu(hidden(x))) + residual(x)` for `rows` input vectors.
@@ -87,7 +108,7 @@ fn tensorName(buf: []u8, comptime fmt: []const u8, args: anytype) []const u8 {
     return std.fmt.bufPrint(buf, fmt, args) catch unreachable;
 }
 
-fn loadLinear(io: std.Io, w: *st.Weights, buf: []u8, prefix: []const u8, name: []const u8, out: usize, in: usize, bias: bool) !Linear {
+fn loadLinear(io: std.Io, backend: ?nn.Backend, w: *st.Weights, buf: []u8, prefix: []const u8, name: []const u8, out: usize, in: usize, bias: bool) !Linear {
     const wn = tensorName(buf, "{s}.{s}.weight", .{ prefix, name });
     const weight = try w.get(io, wn, out * in);
     var bv: ?[]const f32 = null;
@@ -95,7 +116,7 @@ fn loadLinear(io: std.Io, w: *st.Weights, buf: []u8, prefix: []const u8, name: [
         const bn = tensorName(buf, "{s}.{s}.bias", .{ prefix, name });
         bv = try w.get(io, bn, out);
     }
-    return .{ .w = weight, .b = bv };
+    return .{ .w = nn.Weight.initWith(backend, weight), .b = bv };
 }
 
 /// The checkpoint stores the fused projection rows as `(qkv, head_dim, heads)`. Reorder them to
@@ -157,6 +178,7 @@ const Geo = struct {
 
 pub const Model = struct {
     config: cfg.Config,
+    backend: ?nn.Backend,
     patch_proj: ResBlock,
     forecast_query: []const f32,
     layers: []Layer,
@@ -164,43 +186,48 @@ pub const Model = struct {
     head: ResBlock,
     inv_freq: []f32, // head_dim / 2 entries; zero past rope_dim / 2 (identity rotation)
 
-    pub fn load(io: std.Io, allocator: Allocator, config: cfg.Config, w: *st.Weights) !Model {
+    pub fn load(io: std.Io, allocator: Allocator, backend: ?nn.Backend, config: cfg.Config, w: *st.Weights) !Model {
         const d: usize = config.d_model;
         const ps: usize = config.patch_size;
         const hid: usize = config.mlp_hidden_dim;
         var buf: [256]u8 = undefined;
 
-        const patch_proj = try ResBlock.load(io, w, &buf, "representation.patch_proj", 2 * ps, 4 * d, d, true);
+        const patch_proj = try ResBlock.load(io, backend, w, &buf, "representation.patch_proj", 2 * ps, 4 * d, d, true);
+        errdefer patch_proj.deinit();
         const forecast_query = try w.get(io, "representation.forecast_query", d);
-        const head = try ResBlock.load(io, w, &buf, "head.projection", d, 4 * d, ps * config.numQuantiles(), false);
+        const head = try ResBlock.load(io, backend, w, &buf, "head.projection", d, 4 * d, ps * config.numQuantiles(), false);
+        errdefer head.deinit();
         const out_norm = try w.get(io, "transformer.out_norm.scale", d);
 
         const layers = try allocator.alloc(Layer, config.block_schedule.len);
         errdefer allocator.free(layers);
+        var n_loaded: usize = 0;
+        errdefer for (layers[0..n_loaded]) |*layer| layer.deinit(allocator);
         for (config.block_schedule, 0..) |kind, li| {
             const axes = try cfg.layerAxes(kind);
-            var layer: Layer = undefined;
-            layer.n_attn = axes.len;
+            var layer: Layer = .{ .attns = .{ .{}, .{} }, .n_attn = axes.len };
+            errdefer layer.deinit(allocator);
             for (0..axes.len) |ai| {
                 const is_time = axes.is_time[ai];
                 const gate_kind = if (is_time) config.time_attn_gate else config.variate_attn_gate;
-                var a: Attn = undefined;
-                a.is_time = is_time;
+                var a: Attn = .{ .is_time = is_time };
+                errdefer a.deinit(allocator);
                 a.norm = try w.get(io, tensorName(&buf, "transformer.layers.{d}.attn_norms.{d}.scale", .{ li, ai }), d);
                 const nh: usize = config.num_heads;
                 const hd: usize = config.headDim();
-                a.qkv = try permuteQkv(allocator, try w.get(io, tensorName(&buf, "transformer.layers.{d}.attns.{d}.wQKV.weight", .{ li, ai }), 3 * d * d), d, nh, hd);
-                a.out = try w.get(io, tensorName(&buf, "transformer.layers.{d}.attns.{d}.wO.weight", .{ li, ai }), d * d);
+                a.qkv = nn.Weight.initWith(backend, try permuteQkv(allocator, try w.get(io, tensorName(&buf, "transformer.layers.{d}.attns.{d}.wQKV.weight", .{ li, ai }), 3 * d * d), d, nh, hd));
+                a.out = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "transformer.layers.{d}.attns.{d}.wO.weight", .{ li, ai }), d * d));
                 a.gate = if (std.mem.eql(u8, gate_kind, "sdpa_sigmoid"))
-                    try w.get(io, tensorName(&buf, "transformer.layers.{d}.attns.{d}._gate.weight", .{ li, ai }), d * d)
+                    nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "transformer.layers.{d}.attns.{d}._gate.weight", .{ li, ai }), d * d))
                 else
                     null;
                 layer.attns[ai] = a;
             }
             layer.mlp_norm = try w.get(io, tensorName(&buf, "transformer.layers.{d}.mlp_norm.scale", .{li}), d);
-            layer.w12 = try w.get(io, tensorName(&buf, "transformer.layers.{d}.mlp.w12.weight", .{li}), 2 * hid * d);
-            layer.w3 = try w.get(io, tensorName(&buf, "transformer.layers.{d}.mlp.w3.weight", .{li}), d * hid);
+            layer.w12 = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "transformer.layers.{d}.mlp.w12.weight", .{li}), 2 * hid * d));
+            layer.w3 = nn.Weight.initWith(backend, try w.get(io, tensorName(&buf, "transformer.layers.{d}.mlp.w3.weight", .{li}), d * hid));
             layers[li] = layer;
+            n_loaded = li + 1;
         }
 
         const hd: usize = config.headDim();
@@ -215,6 +242,7 @@ pub const Model = struct {
 
         return .{
             .config = config,
+            .backend = backend,
             .patch_proj = patch_proj,
             .forecast_query = forecast_query,
             .layers = layers,
@@ -225,9 +253,9 @@ pub const Model = struct {
     }
 
     pub fn deinit(self: *Model, allocator: Allocator) void {
-        for (self.layers) |layer| {
-            for (layer.attns[0..layer.n_attn]) |a| allocator.free(a.qkv);
-        }
+        self.patch_proj.deinit();
+        self.head.deinit();
+        for (self.layers) |*layer| layer.deinit(allocator);
         allocator.free(self.layers);
         allocator.free(self.inv_freq);
     }
@@ -624,9 +652,9 @@ const TimeJob = struct {
 
             // Encoder queries over encoder keys.
             const mask = core.attn.Mask.pick(!bidir, geo.keys_all_valid, false);
-            core.attn.selfAttendRuntime(mask, scores, q, k, v, o, .{ .q = 3 * d, .k = 3 * d, .v = 3 * d, .o = d }, ne, hd, sm_scale, kv, null);
+            core.attn.selfAttendRuntime(mask, self.model.backend, scores, q, k, v, o, .{ .q = 3 * d, .k = 3 * d, .v = 3 * d, .o = d }, ne, hd, sm_scale, kv, null);
             // Decoder queries: valid context keys, then the causal decoder chain.
-            nn.gemmNT(scores, sl, self.qkv[base + ne * 3 * d + off ..], 3 * d, k, 3 * d, h, sl, hd, sm_scale);
+            nn.gemmNT(self.model.backend, scores, sl, self.qkv[base + ne * 3 * d + off ..], 3 * d, k, 3 * d, h, sl, hd, sm_scale);
             if (geo.keys_all_valid) {
                 // The context keys are `[0, l)`; decoder queries also read their own causal chain,
                 // which starts at `ne`. The gap `[l, ne)` (with covariates) stays out.
@@ -647,7 +675,7 @@ const TimeJob = struct {
                     nn.softmax(row);
                 }
             }
-            nn.gemmNN(o[ne * d ..], d, scores, sl, v, 3 * d, h, hd, sl);
+            nn.gemmNN(self.model.backend, o[ne * d ..], d, scores, sl, v, 3 * d, h, hd, sl);
         }
     }
 };

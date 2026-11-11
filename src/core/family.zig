@@ -119,3 +119,56 @@ pub fn hasArchitecture(allocator: std.mem.Allocator, config_text: []const u8, ar
     }
     return false;
 }
+
+test "registry dispatches to the family that claims the config, and errors otherwise" {
+    const a = std.testing.allocator;
+    const A = struct {
+        pub const name = "A";
+        pub fn matches(_: std.mem.Allocator, text: []const u8) !bool {
+            return std.mem.indexOf(u8, text, "\"a\"") != null;
+        }
+        pub fn run(_: *const Request) !Forecast {
+            return error.RanA;
+        }
+    };
+    const B = struct {
+        pub const name = "B";
+        pub fn matches(_: std.mem.Allocator, text: []const u8) !bool {
+            return std.mem.indexOf(u8, text, "\"b\"") != null;
+        }
+        pub fn run(_: *const Request) !Forecast {
+            return error.RanB;
+        }
+    };
+    const R = Registry(.{ A, B });
+    try std.testing.expectEqualStrings("A, B", R.names);
+    try std.testing.expectEqualStrings("A", (try R.detect(a, "{\"a\":1}")).?);
+    try std.testing.expectEqualStrings("B", (try R.detect(a, "{\"b\":1}")).?);
+    try std.testing.expect((try R.detect(a, "{}")) == null);
+
+    var req: Request = .{
+        .io = undefined,
+        .par_io = undefined,
+        .allocator = a,
+        .model_dir = "",
+        .config_text = "{\"b\":1}",
+        .series_path = "",
+        .horizon = 1,
+    };
+    try std.testing.expectError(error.RanB, R.run(&req));
+    req.config_text = "{\"a\":1}";
+    try std.testing.expectError(error.RanA, R.run(&req));
+    // No silent fallback: a config nobody claims is an error.
+    req.config_text = "{}";
+    try std.testing.expectError(error.UnsupportedArchitecture, R.run(&req));
+}
+
+test "hasArchitecture reads the architectures array and tolerates malformed configs" {
+    const a = std.testing.allocator;
+    try std.testing.expect(try hasArchitecture(a, "{\"architectures\":[\"X\",\"Y\"]}", "Y"));
+    try std.testing.expect(!try hasArchitecture(a, "{\"architectures\":[\"X\"]}", "Y"));
+    try std.testing.expect(!try hasArchitecture(a, "{}", "Y"));
+    try std.testing.expect(!try hasArchitecture(a, "{\"architectures\":\"Y\"}", "Y")); // not an array
+    try std.testing.expect(!try hasArchitecture(a, "[]", "Y")); // not an object: must not trap
+    try std.testing.expect(!try hasArchitecture(a, "{\"architectures\":[1,null]}", "Y"));
+}

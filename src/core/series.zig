@@ -86,3 +86,22 @@ pub fn covariateFile(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8
     }
     return blk;
 }
+
+test "parseBlocks reads blank-line-separated blocks, NaN markers and mixed separators" {
+    const a = std.testing.allocator;
+    const b = try parseBlocks(a, "# comment\n1,2,3\n4 5 6\n\n7,nan,NA\n,,9\n");
+    defer a.free(b.data);
+    try std.testing.expectEqual(@as(usize, 2), b.blocks);
+    try std.testing.expectEqual(@as(usize, 2), b.rows);
+    try std.testing.expectEqual(@as(usize, 3), b.len);
+    try std.testing.expectEqual(@as(f64, 4), b.data[3]);
+    try std.testing.expect(std.math.isNan(b.data[7]) and std.math.isNan(b.data[8]) and std.math.isNan(b.data[9]));
+    try std.testing.expectEqual(@as(f64, 9), b.data[11]);
+}
+
+test "parseBlocks rejects ragged and empty input" {
+    const a = std.testing.allocator;
+    try std.testing.expectError(error.RaggedInput, parseBlocks(a, "1,2,3\n4,5\n"));
+    try std.testing.expectError(error.RaggedBlocks, parseBlocks(a, "1,2\n3,4\n\n5,6\n"));
+    try std.testing.expectError(error.EmptyInput, parseBlocks(a, "\n# nothing\n"));
+}

@@ -134,7 +134,7 @@ Batched series of different lengths are left-padded with NaN by the caller, as t
 
 ## 5. CLI
 
-`timestral <model> series.csv --horizon N` picks the model from `config.json`: `architectures: ["Chronos2Model"]` → Chronos-2, otherwise Timestral. Same CSV in and out (`series,variate,step,q…`). Timestral-only flags (`--no-symmetric`, `--block-patches`, covariates) are rejected for Chronos-2 with a clear error in v1.
+`timestral <model> series.csv --horizon N` picks the model from `config.json`: `architectures: ["Chronos2Model"]` → Chronos-2. (Originally anything else ran as Timestral; the family registry in [model-families.md](model-families.md) replaced that fallback with an error.) Same CSV in and out (`series,variate,step,q…`). Timestral-only flags (`--no-symmetric`, `--block-patches`, covariates) are rejected for Chronos-2 with a clear error in v1.
 
 ## 6. Verification
 

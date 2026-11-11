@@ -9,3 +9,11 @@ pub const par = @import("par.zig");
 pub const sys = @import("sys.zig");
 pub const series = @import("series.zig");
 pub const family = @import("family.zig");
+
+test {
+    // Run the unit tests of the files that have them.
+    _ = @import("attn.zig");
+    _ = @import("family.zig");
+    _ = @import("series.zig");
+    _ = @import("gpu_test.zig");
+}
